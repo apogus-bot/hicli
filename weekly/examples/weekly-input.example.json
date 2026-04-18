@@ -1,0 +1,41 @@
+{
+  "run_label": "example-weekly-content",
+  "week_of": "2026-04-08",
+  "blog": {
+    "title": "AI for Real Estate Agents: What We Shipped This Week",
+    "slug": "ai-for-real-estate-agents-what-we-shipped-this-week",
+    "excerpt": "A short weekly roundup of what HomeInsight shipped and why it matters to working agents.",
+    "content_file": "blog.md",
+    "tags": [
+      "ai",
+      "real-estate",
+      "agent-productivity",
+      "homeinsight"
+    ],
+    "meta_title": "AI for Real Estate Agents: What We Shipped This Week | HomeInsight AI",
+    "meta_description": "A short weekly roundup of what HomeInsight shipped and why it matters to working agents.",
+    "live_url": "https://www.homeinsightai.com/blog/ai-for-real-estate-agents-what-we-shipped-this-week"
+  },
+  "email": {
+    "subject": "HomeInsight Weekly: What We Shipped for Agents",
+    "preheader": "See the latest HomeInsight updates and why they matter for agents.",
+    "headline": "What HomeInsight shipped this week",
+    "cta_label": "Read the full post",
+    "intro_html": "<p style=\"margin:0 0 16px 0;\">We shipped a tighter weekly update focused on what busy agents actually care about: faster workflows, better presentation, and less admin drag.</p>",
+    "closing_html": "<p style=\"margin:0;\">Questions or feedback? Reply to this email and Anthony will see it.</p>",
+    "key_points": [
+      "AI photo staging improvements",
+      "Better co-agent collaboration",
+      "Smoother document workflows"
+    ],
+    "from": "HomeInsight AI <anthony@updates.homeinsightai.com>"
+  },
+  "run": {
+    "create_or_update": false,
+    "publish": false,
+    "generate_email_package": true,
+    "update_blog_email_fields": false,
+    "send_test": false,
+    "output_root": "../runs"
+  }
+}

@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+
+weekly/runs/
+logs/
+
+session.json
+cookies.txt
+auth.env
+
+*.command.json
+*.response.json
+run_state.json

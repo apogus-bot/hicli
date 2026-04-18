@@ -1,0 +1,515 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+HI_HELPER_PY="${HI_HELPER_PY:-${REPO_ROOT}/lib/hi_blog_create.py}"
+
+HI_CONFIG_DIR="${HI_CONFIG_DIR:-${HOME}/.config/hi-cli-homeinsight}"
+HI_SESSION="${HI_CONFIG_DIR}/session.json"
+HI_COOKIES="${HI_CONFIG_DIR}/cookies.txt"
+HI_APP="${HI_APP:-https://www.homeinsightai.com}"
+HI_SUPABASE="${HI_SUPABASE:-https://frausqlhhuparacxpyrv.supabase.co}"
+HI_ANON_KEY="${HI_ANON_KEY:-sb_publishable_ZjXRHkIzpMbAx87N7OzCiQ_lLLqKPf_}"
+HI_DEFAULT_EMAIL="${HI_DEFAULT_EMAIL:-}"
+HI_EMAIL="${HI_EMAIL:-}"
+HI_PASSWORD="${HI_PASSWORD:-}"
+HI_AUTH_ENV_FILE="${HI_AUTH_ENV_FILE:-${HI_CONFIG_DIR}/auth.env}"
+HI_REF="${HI_REF:-frausqlhhuparacxpyrv}"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
+mkdir -p "$HI_CONFIG_DIR"
+err() { echo -e "${RED}✗ $*${NC}" >&2; exit 1; }
+ok() { echo -e "${GREEN}✓ $*${NC}" >&2; }
+info() { echo -e "${CYAN}→ $*${NC}" >&2; }
+pretty() { jq '.' 2>/dev/null || cat; }
+
+# --- Auth ---
+
+load_auth_env() {
+  if [[ "${HI_AUTH_ENV_LOADED:-0}" == "1" ]]; then
+    return 0
+  fi
+  HI_AUTH_ENV_LOADED=1
+
+  if [[ -f "$HI_AUTH_ENV_FILE" ]]; then
+    local perm_oct
+    perm_oct=$((8#$(stat -c '%a' "$HI_AUTH_ENV_FILE" 2>/dev/null || echo 600)))
+    if (( perm_oct & 077 )); then
+      err "Auth env file permissions are too open: $HI_AUTH_ENV_FILE (use chmod 600)"
+    fi
+    set -a
+    # shellcheck disable=SC1090
+    source "$HI_AUTH_ENV_FILE"
+    set +a
+  fi
+
+  HI_EMAIL="${HI_EMAIL:-$HI_DEFAULT_EMAIL}"
+  HI_PASSWORD="${HI_PASSWORD:-}"
+}
+
+auth_summary_json() {
+  load_auth_env
+  local session_exists=false email='' expires_at='null' expired=true has_access_token=false has_refresh_token=false
+  if [[ -f "$HI_SESSION" ]]; then
+    session_exists=true
+    email=$(jq -r '.email // empty' "$HI_SESSION" 2>/dev/null || echo '')
+    local exp_raw now
+    exp_raw=$(jq -r '.expires_at // empty' "$HI_SESSION" 2>/dev/null || echo '')
+    now=$(date +%s)
+    if [[ "$exp_raw" =~ ^[0-9]+$ ]]; then
+      expires_at="$exp_raw"
+      if (( exp_raw > now )); then expired=false; fi
+    fi
+    if jq -e '.access_token // empty' "$HI_SESSION" >/dev/null 2>&1; then has_access_token=true; fi
+    if jq -e '.refresh_token // empty' "$HI_SESSION" >/dev/null 2>&1; then has_refresh_token=true; fi
+  fi
+
+  jq -n     --argjson session_exists "$session_exists"     --arg email "$email"     --argjson expires_at "$expires_at"     --argjson expired "$expired"     --argjson has_access_token "$has_access_token"     --argjson has_refresh_token "$has_refresh_token"     --argjson has_password_env "$(if [[ -n "$HI_PASSWORD" ]]; then echo true; else echo false; fi)"     --arg auth_env_file "$HI_AUTH_ENV_FILE"     --argjson auth_env_file_present "$(if [[ -f "$HI_AUTH_ENV_FILE" ]]; then echo true; else echo false; fi)"     '{session_exists:$session_exists,email:($email|select(. != "")),expires_at:$expires_at,expired:$expired,has_access_token:$has_access_token,has_refresh_token:$has_refresh_token,has_password_env:$has_password_env,auth_env_file:$auth_env_file,auth_env_file_present:$auth_env_file_present}'
+}
+
+# --- Token-based auth (OAuth passthrough) ---
+do_token_refresh() {
+  local refresh_tok
+  refresh_tok=$(jq -r '.refresh_token // empty' "$HI_SESSION" 2>/dev/null)
+  if [[ -z "$refresh_tok" ]]; then return 1; fi
+  local res
+  res=$(curl -s -X POST "${HI_SUPABASE}/auth/v1/token?grant_type=refresh_token" \
+    -H "apikey: ${HI_ANON_KEY}" -H "Content-Type: application/json" \
+    -d "{\"refresh_token\":\"${refresh_tok}\"}")
+  if echo "$res" | jq -e '.access_token' &>/dev/null; then
+    echo "$res" | jq '{access_token:.access_token,refresh_token:.refresh_token,
+      expires_at:.expires_at,email:(.user.email//.email),
+      user_id:(.user.id//.user_id),role:(.user.role//"authenticated")}' > "$HI_SESSION"
+    return 0
+  fi
+  return 1
+}
+ensure_auth_token() {
+  load_auth_env
+  if [[ -f "$HI_SESSION" ]]; then
+    local exp now
+    exp=$(jq -r '.expires_at // 0' "$HI_SESSION" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    if [[ "$exp" =~ ^[0-9]+$ ]] && (( exp > now + 60 )); then
+      if [[ -f "$HI_COOKIES" ]]; then
+        local age=$(( $(date +%s) - $(stat -c %Y "$HI_COOKIES" 2>/dev/null || echo 0) ))
+        if (( age < 3000 )); then return 0; fi
+      fi
+      _build_cookies_from_token "$(jq -r '.access_token' "$HI_SESSION")"
+      return 0
+    fi
+    if do_token_refresh; then
+      _build_cookies_from_token "$(jq -r '.access_token' "$HI_SESSION")"
+      return 0
+    fi
+  fi
+  do_login "$HI_EMAIL" "$HI_PASSWORD"
+}
+_build_cookies_from_token() {
+  local full_session
+  full_session=$(jq -c '.' "$HI_SESSION" 2>/dev/null || echo "{}")
+  local b64="base64-$(echo -n "$full_session" | base64 -w 0)"
+  local len=${#b64} i=0 n=0
+  rm -f "$HI_COOKIES"
+  while (( i < len )); do
+    local chunk="${b64:$i:3600}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      'www.homeinsightai.com' 'TRUE' '/' 'TRUE' '2147483647' \
+      "sb-frausqlhhuparacxpyrv-auth-token.${n}" "${chunk}" >> "$HI_COOKIES"
+    i=$(( i + 3600 )); n=$(( n + 1 ))
+  done
+}
+ensure_auth() {
+  load_auth_env
+  # Check if cookies are fresh (< 50 min old)
+  if [[ -f "$HI_COOKIES" ]]; then
+    local age=$(( $(date +%s) - $(stat -c %Y "$HI_COOKIES" 2>/dev/null || echo 0) ))
+    if (( age < 3000 )); then
+      return 0
+    fi
+  fi
+  do_login "$HI_EMAIL" "$HI_PASSWORD"
+}
+
+do_login() {
+  load_auth_env
+  local email="${1:-$HI_EMAIL}" pass="${2:-$HI_PASSWORD}"
+  [[ -n "$email" ]] || err "Email is required. Set HI_EMAIL or use --email."
+  [[ -n "$pass" ]] || err "Password is required. Set HI_PASSWORD or use --password."
+  info "Authenticating as ${email}..."
+
+  local res=$(curl -s -X POST "${HI_SUPABASE}/auth/v1/token?grant_type=password" \
+    -H "apikey: ${HI_ANON_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "{\"email\":\"${email}\",\"password\":\"${pass}\"}")
+
+  if ! echo "$res" | jq -e '.access_token' &>/dev/null; then
+    local msg=$(echo "$res" | jq -r '.error_description // .msg // .error // "Unknown error"')
+    err "Login failed: ${msg}"
+  fi
+
+  # Save session
+  echo "$res" | jq '{
+    access_token: .access_token,
+    refresh_token: .refresh_token,
+    expires_at: .expires_at,
+    email: .user.email,
+    user_id: .user.id,
+    role: .user.role
+  }' > "$HI_SESSION"
+
+  # Build Supabase SSR cookies (base64-<b64> chunked at 3600 chars)
+  local b64="base64-$(echo -n "$res" | base64 -w 0)"
+  local len=${#b64} i=0 n=0
+  > "$HI_COOKIES"
+  while (( i < len )); do
+    echo "www.homeinsightai.com	FALSE	/	TRUE	0	sb-${HI_REF}-auth-token.${n}	${b64:$i:3600}" >> "$HI_COOKIES"
+    (( i += 3600 )) || true
+    (( n++ )) || true
+  done
+
+  ok "Logged in as ${email}"
+}
+
+# --- API helpers ---
+
+api_get() {
+  ensure_auth_token
+  local path="$1"; shift
+  curl -s -b "$HI_COOKIES" "${HI_APP}/api${path}" "$@"
+}
+
+api_post() {
+  ensure_auth_token
+  local path="$1" data="${2:-{}}"
+  curl -s -X POST -b "$HI_COOKIES" \
+    -H "Content-Type: application/json" \
+    -d "$data" "${HI_APP}/api${path}"
+}
+
+sb_get() {
+  ensure_auth_token
+  local path="$1"; shift
+  local token=$(jq -r '.access_token' "$HI_SESSION")
+  curl -s -H "apikey: ${HI_ANON_KEY}" \
+    -H "Authorization: Bearer ${token}" \
+    "${HI_SUPABASE}/rest/v1/${path}" "$@"
+}
+
+# --- Commands ---
+
+cmd_login() {
+  load_auth_env
+  local email="$HI_EMAIL" pass="$HI_PASSWORD"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --email) email="$2"; shift 2;; --password) pass="$2"; shift 2;; *) shift;; esac
+  done
+  do_login "$email" "$pass"
+  jq '.' "$HI_SESSION"
+}
+
+cmd_auth() {
+  case "${1:-status}" in
+    status)
+      auth_summary_json
+      ;;
+    ensure|refresh)
+      ensure_auth_token
+      auth_summary_json
+      ;;
+    *) err "Unknown: hi auth $1" ;;
+  esac
+}
+
+cmd_whoami() {
+  [[ -f "$HI_SESSION" ]] || err "Not logged in"
+  jq '{email, user_id, role, expires_at: (.expires_at | todate)}' "$HI_SESSION"
+}
+
+cmd_users() {
+  case "${1:-list}" in
+    list) api_get "/admin/users" | pretty;;
+    get)  [[ -z "${2:-}" ]] && err "Usage: hi users get <ID>"
+          sb_get "users?id=eq.${2}&select=*" | pretty;;
+    *) err "Unknown: hi users $1";;
+  esac
+}
+
+cmd_stats() { api_get "/admin/stats" | pretty; }
+
+cmd_properties() {
+  case "${1:-list}" in
+    list)
+      local limit=20
+      shift 2>/dev/null || true
+      while [[ $# -gt 0 ]]; do
+        case "$1" in --limit) limit="$2"; shift 2;; *) shift;; esac
+      done
+      sb_get "properties?select=id,address,city,state,price,status,created_at&limit=${limit}&order=created_at.desc" | pretty
+      ;;
+    get) [[ -z "${2:-}" ]] && err "Usage: hi properties get <ID>"
+         api_get "/properties/${2}" | pretty;;
+    create) info "Reading JSON from stdin..."; api_post "/properties/quick-create" "$(cat)" | pretty;;
+    *) err "Unknown: hi properties $1";;
+  esac
+}
+
+cmd_agents() {
+  case "${1:-list}" in
+    list)   api_get "/admin/agents/list" | pretty;;
+    verify) [[ -z "${2:-}" ]] && err "Usage: hi agents verify <ID>"
+            api_post "/admin/agents/verify" "{\"agentId\":\"${2}\",\"verify\":true}" | pretty;;
+    *) err "Unknown: hi agents $1";;
+  esac
+}
+
+cmd_leads() { api_get "/agents/leads" | pretty; }
+
+cmd_offers() {
+  case "${1:-list}" in
+    list) [[ -z "${2:-}" ]] && err "Usage: hi offers list <PROPERTY_ID>"
+          api_get "/properties/${2}/offers" | pretty;;
+    get)  [[ -z "${2:-}" || -z "${3:-}" ]] && err "Usage: hi offers get <PROPERTY_ID> <OFFER_ID>"
+          api_get "/properties/${2}/offers/${3}" | pretty;;
+    respond) [[ -z "${2:-}" || -z "${3:-}" || -z "${4:-}" ]] && err "Usage: hi offers respond <PROP_ID> <OFFER_ID> '{\"action\":\"accept\"}'"
+          api_post "/properties/${2}/offers/${3}/respond" "${4}" | pretty;;
+    *) err "Unknown: hi offers $1";;
+  esac
+}
+
+cmd_docs() {
+  case "${1:-list}" in
+    list)     api_get "/documents/my-documents" | pretty;;
+    shared)   api_get "/documents/shared-with-me" | pretty;;
+    packages) api_get "/document-packages" | pretty;;
+    upload)   [[ -z "${2:-}" ]] && err "Usage: hi docs upload <PROPERTY_ID> (file via stdin)"
+              info "Use the web UI for file uploads";;
+    analytics) [[ -z "${2:-}" || -z "${3:-}" ]] && err "Usage: hi docs analytics <PROPERTY_ID> <DOC_ID>"
+              api_get "/properties/${2}/documents/analytics" | pretty;;
+    *) err "Unknown: hi docs $1";;
+  esac
+}
+
+cmd_ai() {
+  case "${1:-analytics}" in
+    analytics) api_get "/admin/ai-analytics" | pretty;;
+    analyze)   [[ -z "${2:-}" ]] && err "Usage: hi ai analyze <PROPERTY_ID>"
+               api_get "/properties/${2}/analysis" | pretty;;
+    *) err "Unknown: hi ai $1";;
+  esac
+}
+
+cmd_onboarding() {
+  api_post "/onboarding/complete" "${1:-{}}" | pretty
+}
+
+cmd_dashboard() {
+  api_get "/agent/dashboard-summary" | pretty
+}
+
+cmd_sync() {
+  case "${1:-status}" in
+    status) api_get "/admin/synced-zip-codes" | pretty;;
+    logs)   api_get "/admin/apify-sync-logs" | pretty;;
+    run)
+      local zip=""
+      shift 2>/dev/null || true
+      while [[ $# -gt 0 ]]; do
+        case "$1" in --zip) zip="$2"; shift 2;; *) shift;; esac
+      done
+      if [[ -n "$zip" ]]; then
+        api_post "/admin/apify-sync-zip" "{\"zipCode\":\"${zip}\"}" | pretty
+      else
+        api_post "/admin/apify-sync-manual" "{}" | pretty
+      fi
+      ;;
+    *) err "Unknown: hi sync $1";;
+  esac
+}
+
+cmd_health() { api_get "/va/admin/health" | pretty; }
+
+cmd_api() {
+  ensure_auth_token
+  local method="${1:-GET}" path="${2:-/}"
+  shift 2 2>/dev/null || true
+  local data=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --data|-d) data="$2"; shift 2;; *) shift;; esac
+  done
+  if [[ "$method" == "GET" ]]; then
+    curl -s -b "$HI_COOKIES" "${HI_APP}/api${path}" | pretty
+  else
+    curl -s -X "$method" -b "$HI_COOKIES" -H "Content-Type: application/json" \
+      ${data:+-d "$data"} "${HI_APP}/api${path}" | pretty
+  fi
+}
+
+cmd_help() {
+  cat << 'EOF'
+HomeInsight CLI
+
+USAGE: hi-homeinsight <command> [args]
+
+COMMANDS:
+  login [--email E] [--password P]   Authenticate
+  auth status | ensure                Inspect or refresh auth
+  whoami                              Current session info
+  stats                               Admin dashboard stats
+  users list | get <ID>               User management
+  properties list [--limit N]         List properties
+  properties get <ID>                 Property details
+  properties create                   Create (JSON stdin)
+  agents list | verify <ID>           Agent management
+  leads                               List leads
+  offers list <PROP_ID>               List offers on property
+  offers get <PROP_ID> <OFFER_ID>     Get offer details
+  offers respond <P> <O> <JSON>       Respond to offer
+  docs list                           My documents
+  docs shared                         Shared with me
+  docs packages                       Document packages
+  docs analytics <PROP_ID> <DOC_ID>   Doc analytics
+  ai analytics                        AI analytics (admin)
+  ai analyze <PROP_ID>                AI analysis for property
+  onboarding                          Complete onboarding
+  dashboard                           Agent dashboard summary
+  blog list [limit]                   List blog posts
+  blog get <ID_OR_SLUG>               Get blog post
+  blog create [--title T] ...         Create blog post
+  blog update <ID> [fields...]        Update blog post
+  blog publish <ID>                   Publish blog post
+  blog send-test <ID> [...]           Send test email
+  blog send-campaign <ID> [...]       Send campaign
+  sync status | logs | run [--zip Z]  Apify sync
+  health                              VA health check
+  api METHOD /path [--data JSON]      Raw API call
+EOF
+}
+
+cmd_blog() {
+  ensure_auth_token
+  case "${1:-list}" in
+    list)
+      shift || true
+      local qs="/blog?admin=true"
+      if [[ -n "${1:-}" ]]; then qs="${qs}&limit=${1}"; fi
+      api_get "$qs" | pretty
+      ;;
+    get)
+      [[ -z "${2:-}" ]] && err "Usage: hi blog get <ID_OR_SLUG>"
+      api_get "/blog/${2}" | pretty
+      ;;
+    create)
+      shift || true
+      local payload
+      payload=$(python3 "$HI_HELPER_PY" "$@")
+      if echo "$payload" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'error' not in d else 1)" 2>/dev/null; then
+         ensure_auth_token
+         curl -s -X POST -b "$HI_COOKIES"            -H "Content-Type: application/json"            -d "$payload" "${HI_APP}/api/blog" | pretty
+      else
+         err "$payload"
+      fi
+      ;;
+    update)
+      [[ -z "${2:-}" ]] && err "Usage: hi blog update <ID> [fields...]"
+      local id="$2" title="" slug="" excerpt="" tags="" meta_title="" meta_description="" content_file="" featured_image_url="" email_html_file="" email_subject=""
+      shift 2 || true
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --title) title="$2"; shift 2 ;;
+          --slug) slug="$2"; shift 2 ;;
+          --excerpt) excerpt="$2"; shift 2 ;;
+          --tags) tags="$2"; shift 2 ;;
+          --meta-title) meta_title="$2"; shift 2 ;;
+          --meta-description) meta_description="$2"; shift 2 ;;
+          --content-file) content_file="$2"; shift 2 ;;
+          --featured-image-url) featured_image_url="$2"; shift 2 ;;
+          --email-html-file) email_html_file="$2"; shift 2 ;;
+          --email-subject) email_subject="$2"; shift 2 ;;
+          *) err "Unknown arg for hi blog update: $1" ;;
+        esac
+      done
+      local payload='{}'
+      [[ -n "$title" ]] && payload=$(jq --arg v "$title" '.title=$v' <<<"$payload")
+      [[ -n "$slug" ]] && payload=$(jq --arg v "$slug" '.slug=$v' <<<"$payload")
+      [[ -n "$excerpt" ]] && payload=$(jq --arg v "$excerpt" '.excerpt=$v' <<<"$payload")
+      [[ -n "$featured_image_url" ]] && payload=$(jq --arg v "$featured_image_url" '.featured_image_url=$v' <<<"$payload")
+      [[ -n "$meta_title" ]] && payload=$(jq --arg v "$meta_title" '.meta_title=$v' <<<"$payload")
+      [[ -n "$meta_description" ]] && payload=$(jq --arg v "$meta_description" '.meta_description=$v' <<<"$payload")
+      [[ -n "$tags" ]] && payload=$(jq --argjson v "$tags" '.tags=$v' <<<"$payload")
+      if [[ -n "$content_file" ]]; then [[ -f "$content_file" ]] || err "Content file not found: $content_file"; payload=$(jq --rawfile v "$content_file" '.content=$v' <<<"$payload"); fi
+      if [[ -n "$email_html_file" ]]; then [[ -f "$email_html_file" ]] || err "Email file not found: $email_html_file"; payload=$(jq --rawfile v "$email_html_file" '.email_html=$v' <<<"$payload"); fi
+      [[ -n "$email_subject" ]] && payload=$(jq --arg v "$email_subject" '.email_subject=$v' <<<"$payload")
+      curl -s -X PATCH -b "$HI_COOKIES" -H "Content-Type: application/json" -d "$payload" "${HI_APP}/api/blog/${id}" | pretty
+      ;;
+    publish)
+      [[ -z "${2:-}" ]] && err "Usage: hi blog publish <ID>"
+      api_post "/blog/${2}/publish" '{}' | pretty
+      ;;
+    send-test)
+      [[ -z "${2:-}" ]] && err "Usage: hi blog send-test <ID> [--subject S] [--email-html-file file]"
+      local id="$2" subject="" email_html_file="" from_address=""
+      shift 2 || true
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --subject) subject="$2"; shift 2 ;;
+          --email-html-file) email_html_file="$2"; shift 2 ;;
+          --from) from_address="$2"; shift 2 ;;
+          *) err "Unknown arg for hi blog send-test: $1" ;;
+        esac
+      done
+      local payload='{}'
+      [[ -n "$subject" ]] && payload=$(jq --arg v "$subject" '.email_subject=$v' <<<"$payload")
+      [[ -n "$from_address" ]] && payload=$(jq --arg v "$from_address" '.from_address=$v' <<<"$payload")
+      if [[ -n "$email_html_file" ]]; then [[ -f "$email_html_file" ]] || err "Email file not found: $email_html_file"; payload=$(jq --rawfile v "$email_html_file" '.email_html=$v' <<<"$payload"); fi
+      api_post "/blog/${id}/send-test" "$payload" | pretty
+      ;;
+    send-campaign)
+      [[ -z "${2:-}" ]] && err "Usage: hi blog send-campaign <ID> --audience all_agents|clients|all_users|custom_list [--emails '[...]']"
+      local id="$2" audience="" emails="[]" subject="" email_html_file="" from_address=""
+      shift 2 || true
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --audience) audience="$2"; shift 2 ;;
+          --emails) emails="$2"; shift 2 ;;
+          --subject) subject="$2"; shift 2 ;;
+          --email-html-file) email_html_file="$2"; shift 2 ;;
+          --from) from_address="$2"; shift 2 ;;
+          *) err "Unknown arg for hi blog send-campaign: $1" ;;
+        esac
+      done
+      [[ -z "$audience" ]] && err "--audience is required"
+      local payload='{}'
+      payload=$(jq --arg v "$audience" '.audience=$v' <<<"$payload")
+      [[ -n "$subject" ]] && payload=$(jq --arg v "$subject" '.email_subject=$v' <<<"$payload")
+      [[ -n "$from_address" ]] && payload=$(jq --arg v "$from_address" '.from_address=$v' <<<"$payload")
+      [[ "$audience" == "custom_list" ]] && payload=$(jq --argjson v "$emails" '.emails=$v' <<<"$payload")
+      if [[ -n "$email_html_file" ]]; then [[ -f "$email_html_file" ]] || err "Email file not found: $email_html_file"; payload=$(jq --rawfile v "$email_html_file" '.email_html=$v' <<<"$payload"); fi
+      api_post "/blog/${id}/send-campaign" "$payload" | pretty
+      ;;
+    *) err "Unknown: hi blog $1" ;;
+  esac
+}
+
+case "${1:-help}" in
+  login) shift; cmd_login "$@";;
+  auth) shift; cmd_auth "$@";;
+  whoami) cmd_whoami;;
+  users) shift; cmd_users "$@";;
+  stats) cmd_stats;;
+  properties) shift; cmd_properties "$@";;
+  agents) shift; cmd_agents "$@";;
+  leads) cmd_leads;;
+  offers) shift; cmd_offers "$@";;
+  docs) shift; cmd_docs "$@";;
+  ai) shift; cmd_ai "$@";;
+  onboarding) shift; cmd_onboarding "$@";;
+  dashboard) cmd_dashboard;;
+  blog) shift; cmd_blog "$@";;
+  sync) shift; cmd_sync "$@";;
+  health) cmd_health;;
+  api) shift; cmd_api "$@";;
+  help|--help|-h) cmd_help;;
+  *) err "Unknown: $1 — run 'hi-homeinsight help'";;
+esac
