@@ -38,6 +38,8 @@ Concise command map for the customer-facing HomeInsight assistant CLI.
 
 ## Admin / internal actions
 
+These commands remain available for trusted internal workflows, but they are intentionally hidden by default in the public CLI surface. Enable them only when needed by setting `HI_ENABLE_ADMIN=1`.
+
 - `stats` — admin dashboard stats
 - `users list|get` — admin user lookup
 - `agents list|verify` — agent management

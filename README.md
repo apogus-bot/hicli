@@ -21,6 +21,8 @@ Never commit:
 - `weekly/runs/`
 - `logs/`
 
+The CLI locks `~/.config/hi-cli-homeinsight/` to `0700` and session/cookie files to `0600`, but those files still contain live auth material and must remain local-only.
+
 ## Quick start
 
 ```bash
@@ -41,6 +43,18 @@ Then:
 ```bash
 bin/hi-homeinsight auth status
 bin/hi-homeinsight auth ensure
+```
+
+Passwords are no longer accepted via `--password` to avoid leaking credentials through shell history or process lists. Put `HI_PASSWORD` in the local auth env file (or export it only in a trusted local shell session).
+
+## Admin commands
+
+Admin/internal commands are hidden by default in the public CLI surface.
+
+Only enable them for trusted internal workflows:
+
+```bash
+HI_ENABLE_ADMIN=1 bin/hi-homeinsight help
 ```
 
 ## Config overrides

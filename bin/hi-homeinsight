@@ -17,12 +17,52 @@ HI_PASSWORD="${HI_PASSWORD:-}"
 HI_AUTH_ENV_FILE="${HI_AUTH_ENV_FILE:-${HI_CONFIG_DIR}/auth.env}"
 HI_REF="${HI_REF:-frausqlhhuparacxpyrv}"
 
+umask 077
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
-mkdir -p "$HI_CONFIG_DIR"
 err() { echo -e "${RED}✗ $*${NC}" >&2; exit 1; }
 ok() { echo -e "${GREEN}✓ $*${NC}" >&2; }
 info() { echo -e "${CYAN}→ $*${NC}" >&2; }
 pretty() { jq '.' 2>/dev/null || cat; }
+
+secure_dir() {
+  local path="$1"
+  mkdir -p "$path"
+  chmod 700 "$path"
+}
+
+secure_file() {
+  local path="$1"
+  [[ -e "$path" ]] || return 0
+  chmod 600 "$path"
+}
+
+write_secure_json() {
+  local path="$1" payload="$2"
+  printf '%s\n' "$payload" > "$path"
+  secure_file "$path"
+}
+
+admin_enabled() {
+  [[ "${HI_ENABLE_ADMIN:-0}" == "1" ]]
+}
+
+require_admin_enabled() {
+  admin_enabled || err "This command is admin-only. Re-run with HI_ENABLE_ADMIN=1 if you really need it."
+}
+
+prompt_for_password() {
+  local entered=''
+  if [[ ! -t 0 ]]; then
+    err "Password is required. Set HI_PASSWORD in your local auth env instead of passing --password."
+  fi
+  read -r -s -p 'HomeInsight password: ' entered
+  echo >&2
+  [[ -n "$entered" ]] || err "Password is required. Set HI_PASSWORD in your local auth env instead of passing --password."
+  printf '%s' "$entered"
+}
+
+secure_dir "$HI_CONFIG_DIR"
 
 # --- Auth ---
 
@@ -65,7 +105,7 @@ auth_summary_json() {
     if jq -e '.refresh_token // empty' "$HI_SESSION" >/dev/null 2>&1; then has_refresh_token=true; fi
   fi
 
-  jq -n     --argjson session_exists "$session_exists"     --arg email "$email"     --argjson expires_at "$expires_at"     --argjson expired "$expired"     --argjson has_access_token "$has_access_token"     --argjson has_refresh_token "$has_refresh_token"     --argjson has_password_env "$(if [[ -n "$HI_PASSWORD" ]]; then echo true; else echo false; fi)"     --arg auth_env_file "$HI_AUTH_ENV_FILE"     --argjson auth_env_file_present "$(if [[ -f "$HI_AUTH_ENV_FILE" ]]; then echo true; else echo false; fi)"     '{session_exists:$session_exists,email:($email|select(. != "")),expires_at:$expires_at,expired:$expired,has_access_token:$has_access_token,has_refresh_token:$has_refresh_token,has_password_env:$has_password_env,auth_env_file:$auth_env_file,auth_env_file_present:$auth_env_file_present}'
+  jq -n     --argjson session_exists "$session_exists"     --arg email "$email"     --argjson expires_at "$expires_at"     --argjson expired "$expired"     --argjson has_access_token "$has_access_token"     --argjson has_refresh_token "$has_refresh_token"     --argjson has_password_env "$(if [[ -n "$HI_PASSWORD" ]]; then echo true; else echo false; fi)"     --argjson auth_env_file_present "$(if [[ -f "$HI_AUTH_ENV_FILE" ]]; then echo true; else echo false; fi)"     '{session_exists:$session_exists,email:($email|select(. != "")),expires_at:$expires_at,expired:$expired,has_access_token:$has_access_token,has_refresh_token:$has_refresh_token,has_password_env:$has_password_env,auth_env_file_present:$auth_env_file_present}'
 }
 
 # --- Token-based auth (OAuth passthrough) ---
@@ -78,9 +118,9 @@ do_token_refresh() {
     -H "apikey: ${HI_ANON_KEY}" -H "Content-Type: application/json" \
     -d "{\"refresh_token\":\"${refresh_tok}\"}")
   if echo "$res" | jq -e '.access_token' &>/dev/null; then
-    echo "$res" | jq '{access_token:.access_token,refresh_token:.refresh_token,
+    write_secure_json "$HI_SESSION" "$(echo "$res" | jq '{access_token:.access_token,refresh_token:.refresh_token,
       expires_at:.expires_at,email:(.user.email//.email),
-      user_id:(.user.id//.user_id),role:(.user.role//"authenticated")}' > "$HI_SESSION"
+      user_id:(.user.id//.user_id),role:(.user.role//"authenticated")}')"
     return 0
   fi
   return 1
@@ -119,6 +159,7 @@ _build_cookies_from_token() {
       "sb-frausqlhhuparacxpyrv-auth-token.${n}" "${chunk}" >> "$HI_COOKIES"
     i=$(( i + 3600 )); n=$(( n + 1 ))
   done
+  secure_file "$HI_COOKIES"
 }
 ensure_auth() {
   load_auth_env
@@ -136,7 +177,9 @@ do_login() {
   load_auth_env
   local email="${1:-$HI_EMAIL}" pass="${2:-$HI_PASSWORD}"
   [[ -n "$email" ]] || err "Email is required. Set HI_EMAIL or use --email."
-  [[ -n "$pass" ]] || err "Password is required. Set HI_PASSWORD or use --password."
+  if [[ -z "$pass" ]]; then
+    pass=$(prompt_for_password)
+  fi
   info "Authenticating as ${email}..."
 
   local res=$(curl -s -X POST "${HI_SUPABASE}/auth/v1/token?grant_type=password" \
@@ -150,14 +193,14 @@ do_login() {
   fi
 
   # Save session
-  echo "$res" | jq '{
+  write_secure_json "$HI_SESSION" "$(echo "$res" | jq '{
     access_token: .access_token,
     refresh_token: .refresh_token,
     expires_at: .expires_at,
     email: .user.email,
     user_id: .user.id,
     role: .user.role
-  }' > "$HI_SESSION"
+  }')"
 
   # Build Supabase SSR cookies (base64-<b64> chunked at 3600 chars)
   local b64="base64-$(echo -n "$res" | base64 -w 0)"
@@ -168,6 +211,7 @@ do_login() {
     (( i += 3600 )) || true
     (( n++ )) || true
   done
+  secure_file "$HI_COOKIES"
 
   ok "Logged in as ${email}"
 }
@@ -203,7 +247,11 @@ cmd_login() {
   load_auth_env
   local email="$HI_EMAIL" pass="$HI_PASSWORD"
   while [[ $# -gt 0 ]]; do
-    case "$1" in --email) email="$2"; shift 2;; --password) pass="$2"; shift 2;; *) shift;; esac
+    case "$1" in
+      --email) email="$2"; shift 2;;
+      --password) err "Passing --password is disabled. Put HI_PASSWORD in your local auth env instead.";;
+      *) shift;;
+    esac
   done
   do_login "$email" "$pass"
   jq '.' "$HI_SESSION"
@@ -228,6 +276,7 @@ cmd_whoami() {
 }
 
 cmd_users() {
+  require_admin_enabled
   case "${1:-list}" in
     list) api_get "/admin/users" | pretty;;
     get)  [[ -z "${2:-}" ]] && err "Usage: hi users get <ID>"
@@ -236,7 +285,7 @@ cmd_users() {
   esac
 }
 
-cmd_stats() { api_get "/admin/stats" | pretty; }
+cmd_stats() { require_admin_enabled; api_get "/admin/stats" | pretty; }
 
 cmd_properties() {
   case "${1:-list}" in
@@ -256,6 +305,7 @@ cmd_properties() {
 }
 
 cmd_agents() {
+  require_admin_enabled
   case "${1:-list}" in
     list)   api_get "/admin/agents/list" | pretty;;
     verify) [[ -z "${2:-}" ]] && err "Usage: hi agents verify <ID>"
@@ -292,6 +342,7 @@ cmd_docs() {
 }
 
 cmd_ai() {
+  require_admin_enabled
   case "${1:-analytics}" in
     analytics) api_get "/admin/ai-analytics" | pretty;;
     analyze)   [[ -z "${2:-}" ]] && err "Usage: hi ai analyze <PROPERTY_ID>"
@@ -309,6 +360,7 @@ cmd_dashboard() {
 }
 
 cmd_sync() {
+  require_admin_enabled
   case "${1:-status}" in
     status) api_get "/admin/synced-zip-codes" | pretty;;
     logs)   api_get "/admin/apify-sync-logs" | pretty;;
@@ -328,9 +380,10 @@ cmd_sync() {
   esac
 }
 
-cmd_health() { api_get "/va/admin/health" | pretty; }
+cmd_health() { require_admin_enabled; api_get "/va/admin/health" | pretty; }
 
 cmd_api() {
+  require_admin_enabled
   ensure_auth_token
   local method="${1:-GET}" path="${2:-/}"
   shift 2 2>/dev/null || true
@@ -347,44 +400,56 @@ cmd_api() {
 }
 
 cmd_help() {
-  cat << 'EOF'
+  cat <<EOF
 HomeInsight CLI
 
 USAGE: hi-homeinsight <command> [args]
 
 COMMANDS:
-  login [--email E] [--password P]   Authenticate
-  auth status | ensure                Inspect or refresh auth
-  whoami                              Current session info
+  login [--email E]                  Authenticate (password comes from HI_PASSWORD or local auth env)
+  auth status | ensure               Inspect or refresh auth
+  whoami                             Current session info
+  properties list [--limit N]        List properties
+  properties get <ID>                Property details
+  properties create                  Create (JSON stdin)
+  leads                              List leads
+  offers list <PROP_ID>              List offers on property
+  offers get <PROP_ID> <OFFER_ID>    Get offer details
+  offers respond <P> <O> <JSON>      Respond to offer
+  docs list                          My documents
+  docs shared                        Shared with me
+  docs packages                      Document packages
+  docs analytics <PROP_ID> <DOC_ID>  Doc analytics
+  onboarding                         Complete onboarding
+  dashboard                          Agent dashboard summary
+  blog list [limit]                  List blog posts
+  blog get <ID_OR_SLUG>              Get blog post
+  blog create [--title T] ...        Create blog post
+  blog update <ID> [fields...]       Update blog post
+  blog publish <ID>                  Publish blog post
+  blog send-test <ID> [...]          Send test email
+  blog send-campaign <ID> [...]      Send campaign
+EOF
+
+  if admin_enabled; then
+    cat <<'EOF'
+
+ADMIN COMMANDS (HI_ENABLE_ADMIN=1):
   stats                               Admin dashboard stats
   users list | get <ID>               User management
-  properties list [--limit N]         List properties
-  properties get <ID>                 Property details
-  properties create                   Create (JSON stdin)
   agents list | verify <ID>           Agent management
-  leads                               List leads
-  offers list <PROP_ID>               List offers on property
-  offers get <PROP_ID> <OFFER_ID>     Get offer details
-  offers respond <P> <O> <JSON>       Respond to offer
-  docs list                           My documents
-  docs shared                         Shared with me
-  docs packages                       Document packages
-  docs analytics <PROP_ID> <DOC_ID>   Doc analytics
   ai analytics                        AI analytics (admin)
   ai analyze <PROP_ID>                AI analysis for property
-  onboarding                          Complete onboarding
-  dashboard                           Agent dashboard summary
-  blog list [limit]                   List blog posts
-  blog get <ID_OR_SLUG>               Get blog post
-  blog create [--title T] ...         Create blog post
-  blog update <ID> [fields...]        Update blog post
-  blog publish <ID>                   Publish blog post
-  blog send-test <ID> [...]           Send test email
-  blog send-campaign <ID> [...]       Send campaign
   sync status | logs | run [--zip Z]  Apify sync
   health                              VA health check
   api METHOD /path [--data JSON]      Raw API call
 EOF
+  else
+    cat <<'EOF'
+
+Admin commands are hidden by default. Set HI_ENABLE_ADMIN=1 only for trusted internal/admin workflows.
+EOF
+  fi
 }
 
 cmd_blog() {
