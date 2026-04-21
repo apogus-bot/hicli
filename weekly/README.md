@@ -13,6 +13,8 @@ Optional workflow wrapper around `bin/hi-homeinsight`.
 7. Sends a test email.
 8. Writes local run state under `weekly/runs/`.
 
+Run directories and JSONL logs are created with owner-only permissions. Command artifact files store argument lists, return codes, and stdout/stderr byte counts instead of full stdout/stderr by default, so local run logs leak less auth/session detail.
+
 ## Dry run
 
 ```bash

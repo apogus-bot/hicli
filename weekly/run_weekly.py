@@ -43,16 +43,25 @@ def slugify(value: str) -> str:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def secure_file(path: Path) -> None:
+    if path.exists():
+        os.chmod(path, 0o600)
 
 
 def write_json(path: Path, data: Any) -> None:
+    ensure_dir(path.parent)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    secure_file(path)
 
 
 def append_jsonl(path: Path, data: Dict[str, Any]) -> None:
     ensure_dir(path.parent)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data, sort_keys=True) + "\n")
+    secure_file(path)
 
 
 def resolve_path(base_dir: Path, maybe_path: Optional[str]) -> Optional[Path]:
@@ -119,7 +128,7 @@ def load_manifest(path: Path) -> Dict[str, Any]:
 
 
 def session_snapshot() -> Dict[str, Any]:
-    snapshot: Dict[str, Any] = {"exists": SESSION_PATH.exists(), "path": str(SESSION_PATH)}
+    snapshot: Dict[str, Any] = {"exists": SESSION_PATH.exists()}
     if not SESSION_PATH.exists():
         snapshot["expired"] = True
         snapshot["has_password_env"] = bool(os.environ.get("HI_PASSWORD"))
@@ -134,7 +143,6 @@ def session_snapshot() -> Dict[str, Any]:
 
     expires_at = data.get("expires_at")
     snapshot["email"] = data.get("email")
-    snapshot["user_id"] = data.get("user_id")
     snapshot["expires_at"] = expires_at
     snapshot["has_access_token"] = bool(data.get("access_token"))
     snapshot["has_refresh_token"] = bool(data.get("refresh_token"))
@@ -146,17 +154,23 @@ def session_snapshot() -> Dict[str, Any]:
     return snapshot
 
 
+def make_command_record(args: List[str], result: subprocess.CompletedProcess[str], **extra: Any) -> Dict[str, Any]:
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    return {
+        "args": args,
+        "returncode": result.returncode,
+        "stdout_bytes": len(stdout.encode("utf-8")),
+        "stderr_bytes": len(stderr.encode("utf-8")),
+        **extra,
+    }
+
+
 def ensure_auth_ready(run_dir: Path) -> Dict[str, Any]:
     command_args = [str(HI_CLI), "auth", "ensure"]
     session_before = session_snapshot()
     result = subprocess.run(command_args, capture_output=True, text=True)
-    command_record = {
-        "args": command_args,
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "session_before": session_before,
-    }
+    command_record = make_command_record(command_args, result, session_before=session_before)
     if result.returncode == 0:
         command_record["session_after"] = session_snapshot()
     write_json(run_dir / "auth_preflight.command.json", command_record)
@@ -183,12 +197,7 @@ def ensure_auth_ready(run_dir: Path) -> Dict[str, Any]:
 
 def run_command(args: List[str], run_dir: Path, step_name: str) -> Dict[str, Any]:
     result = subprocess.run(args, capture_output=True, text=True)
-    command_record = {
-        "args": args,
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    }
+    command_record = make_command_record(args, result)
     write_json(run_dir / f"{step_name}.command.json", command_record)
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "command failed").strip()
