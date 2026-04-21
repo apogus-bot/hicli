@@ -36,22 +36,7 @@ Concise command map for the customer-facing HomeInsight assistant CLI.
 - `blog send-campaign <id> --audience ... [...]` — send the full campaign
 - `weekly/run_weekly.py <manifest> [--dry-run]` — wrapper for the full weekly blog/email workflow
 
-## Admin / internal actions
-
-These commands remain available for trusted internal workflows, but they are intentionally hidden by default in the public CLI surface. Enable them only when needed by setting `HI_ENABLE_ADMIN=1`.
-
-- `stats` — admin dashboard stats
-- `users list|get` — admin user lookup
-- `agents list|verify` — agent management
-- `ai analytics` — AI usage/ops analytics
-- `ai analyze <property_id>` — AI analysis for a property
-- `sync status|logs|run` — Apify/data sync operations
-- `health` — VA/admin health endpoint
-- `api METHOD /path [--data JSON]` — raw authenticated API escape hatch
-
 ## Expected VA behavior
 
 - Prefer high-level task verbs in UX copy: *check auth, list properties, review offers, publish post, send test email*.
-- Use `api` only for endpoints not yet wrapped by a first-class command.
-- Treat `stats`, `users`, `agents`, `ai analytics`, `sync`, and `health` as internal/admin-only actions in customer-facing experiences.
 - Keep secrets local in `~/.config/hi-cli-homeinsight/` and never commit session, cookies, or auth env files.

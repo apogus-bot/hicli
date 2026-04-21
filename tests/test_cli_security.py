@@ -37,18 +37,12 @@ class HomeInsightCliSecurityTests(unittest.TestCase):
         self.assertNotIn("api METHOD /path [--data JSON]", result.stdout)
         self.assertNotIn("sync status | logs | run", result.stdout)
 
-    def test_admin_command_blocked_without_enable_flag(self):
+    def test_help_contains_only_public_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = self.run_cli("stats", env={"HI_CONFIG_DIR": tmp})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("HI_ENABLE_ADMIN=1", result.stderr)
-
-    def test_admin_help_visible_with_enable_flag(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            result = self.run_cli("help", env={"HI_CONFIG_DIR": tmp, "HI_ENABLE_ADMIN": "1"})
+            result = self.run_cli("help", env={"HI_CONFIG_DIR": tmp})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("stats                               Admin dashboard stats", result.stdout)
-        self.assertIn("api METHOD /path [--data JSON]", result.stdout)
+        self.assertNotIn("ADMIN COMMANDS", result.stdout)
+        self.assertNotIn("admin-only", result.stdout)
 
     def test_help_locks_config_dir_permissions(self):
         with tempfile.TemporaryDirectory() as tmp_parent:

@@ -43,14 +43,6 @@ write_secure_json() {
   secure_file "$path"
 }
 
-admin_enabled() {
-  [[ "${HI_ENABLE_ADMIN:-0}" == "1" ]]
-}
-
-require_admin_enabled() {
-  admin_enabled || err "This command is admin-only. Re-run with HI_ENABLE_ADMIN=1 if you really need it."
-}
-
 prompt_for_password() {
   local entered=''
   if [[ ! -t 0 ]]; then
@@ -275,18 +267,6 @@ cmd_whoami() {
   jq '{email, user_id, role, expires_at: (.expires_at | todate)}' "$HI_SESSION"
 }
 
-cmd_users() {
-  require_admin_enabled
-  case "${1:-list}" in
-    list) api_get "/admin/users" | pretty;;
-    get)  [[ -z "${2:-}" ]] && err "Usage: hi users get <ID>"
-          sb_get "users?id=eq.${2}&select=*" | pretty;;
-    *) err "Unknown: hi users $1";;
-  esac
-}
-
-cmd_stats() { require_admin_enabled; api_get "/admin/stats" | pretty; }
-
 cmd_properties() {
   case "${1:-list}" in
     list)
@@ -301,16 +281,6 @@ cmd_properties() {
          api_get "/properties/${2}" | pretty;;
     create) info "Reading JSON from stdin..."; api_post "/properties/quick-create" "$(cat)" | pretty;;
     *) err "Unknown: hi properties $1";;
-  esac
-}
-
-cmd_agents() {
-  require_admin_enabled
-  case "${1:-list}" in
-    list)   api_get "/admin/agents/list" | pretty;;
-    verify) [[ -z "${2:-}" ]] && err "Usage: hi agents verify <ID>"
-            api_post "/admin/agents/verify" "{\"agentId\":\"${2}\",\"verify\":true}" | pretty;;
-    *) err "Unknown: hi agents $1";;
   esac
 }
 
@@ -341,62 +311,12 @@ cmd_docs() {
   esac
 }
 
-cmd_ai() {
-  require_admin_enabled
-  case "${1:-analytics}" in
-    analytics) api_get "/admin/ai-analytics" | pretty;;
-    analyze)   [[ -z "${2:-}" ]] && err "Usage: hi ai analyze <PROPERTY_ID>"
-               api_get "/properties/${2}/analysis" | pretty;;
-    *) err "Unknown: hi ai $1";;
-  esac
-}
-
 cmd_onboarding() {
   api_post "/onboarding/complete" "${1:-{}}" | pretty
 }
 
 cmd_dashboard() {
   api_get "/agent/dashboard-summary" | pretty
-}
-
-cmd_sync() {
-  require_admin_enabled
-  case "${1:-status}" in
-    status) api_get "/admin/synced-zip-codes" | pretty;;
-    logs)   api_get "/admin/apify-sync-logs" | pretty;;
-    run)
-      local zip=""
-      shift 2>/dev/null || true
-      while [[ $# -gt 0 ]]; do
-        case "$1" in --zip) zip="$2"; shift 2;; *) shift;; esac
-      done
-      if [[ -n "$zip" ]]; then
-        api_post "/admin/apify-sync-zip" "{\"zipCode\":\"${zip}\"}" | pretty
-      else
-        api_post "/admin/apify-sync-manual" "{}" | pretty
-      fi
-      ;;
-    *) err "Unknown: hi sync $1";;
-  esac
-}
-
-cmd_health() { require_admin_enabled; api_get "/va/admin/health" | pretty; }
-
-cmd_api() {
-  require_admin_enabled
-  ensure_auth_token
-  local method="${1:-GET}" path="${2:-/}"
-  shift 2 2>/dev/null || true
-  local data=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in --data|-d) data="$2"; shift 2;; *) shift;; esac
-  done
-  if [[ "$method" == "GET" ]]; then
-    curl -s -b "$HI_COOKIES" "${HI_APP}/api${path}" | pretty
-  else
-    curl -s -X "$method" -b "$HI_COOKIES" -H "Content-Type: application/json" \
-      ${data:+-d "$data"} "${HI_APP}/api${path}" | pretty
-  fi
 }
 
 cmd_help() {
@@ -430,26 +350,6 @@ COMMANDS:
   blog send-test <ID> [...]          Send test email
   blog send-campaign <ID> [...]      Send campaign
 EOF
-
-  if admin_enabled; then
-    cat <<'EOF'
-
-ADMIN COMMANDS (HI_ENABLE_ADMIN=1):
-  stats                               Admin dashboard stats
-  users list | get <ID>               User management
-  agents list | verify <ID>           Agent management
-  ai analytics                        AI analytics (admin)
-  ai analyze <PROP_ID>                AI analysis for property
-  sync status | logs | run [--zip Z]  Apify sync
-  health                              VA health check
-  api METHOD /path [--data JSON]      Raw API call
-EOF
-  else
-    cat <<'EOF'
-
-Admin commands are hidden by default. Set HI_ENABLE_ADMIN=1 only for trusted internal/admin workflows.
-EOF
-  fi
 }
 
 cmd_blog() {
@@ -457,8 +357,8 @@ cmd_blog() {
   case "${1:-list}" in
     list)
       shift || true
-      local qs="/blog?admin=true"
-      if [[ -n "${1:-}" ]]; then qs="${qs}&limit=${1}"; fi
+      local qs="/blog"
+      if [[ -n "${1:-}" ]]; then qs="${qs}?limit=${1}"; fi
       api_get "$qs" | pretty
       ;;
     get)
@@ -561,20 +461,13 @@ case "${1:-help}" in
   login) shift; cmd_login "$@";;
   auth) shift; cmd_auth "$@";;
   whoami) cmd_whoami;;
-  users) shift; cmd_users "$@";;
-  stats) cmd_stats;;
   properties) shift; cmd_properties "$@";;
-  agents) shift; cmd_agents "$@";;
   leads) cmd_leads;;
   offers) shift; cmd_offers "$@";;
   docs) shift; cmd_docs "$@";;
-  ai) shift; cmd_ai "$@";;
   onboarding) shift; cmd_onboarding "$@";;
   dashboard) cmd_dashboard;;
   blog) shift; cmd_blog "$@";;
-  sync) shift; cmd_sync "$@";;
-  health) cmd_health;;
-  api) shift; cmd_api "$@";;
   help|--help|-h) cmd_help;;
   *) err "Unknown: $1 — run 'hi-homeinsight help'";;
 esac
