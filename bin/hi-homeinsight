@@ -169,7 +169,7 @@ auth_summary_json() {
     --argjson has_refresh_token "$has_refresh_token" \
     --argjson has_password_env "$(if [[ -n "$HI_PASSWORD" ]]; then echo true; else echo false; fi)" \
     --argjson auth_env_file_present "$(if [[ -f "$HI_AUTH_ENV_FILE" ]]; then echo true; else echo false; fi)" \
-    '{session_exists:$session_exists,email:($email|select(. != "")),expires_at:$expires_at,expired:$expired,has_access_token:$has_access_token,has_refresh_token:$has_refresh_token,has_password_env:$has_password_env,auth_env_file_present:$auth_env_file_present}'
+    '{session_exists:$session_exists,email:(if $email != "" then $email else null end),expires_at:$expires_at,expired:$expired,has_access_token:$has_access_token,has_refresh_token:$has_refresh_token,has_password_env:$has_password_env,auth_env_file_present:$auth_env_file_present}'
 }
 
 do_token_refresh() {

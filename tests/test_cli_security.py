@@ -52,6 +52,15 @@ class HomeInsightCliSecurityTests(unittest.TestCase):
             mode = stat.S_IMODE(config_dir.stat().st_mode)
         self.assertEqual(mode, 0o700)
 
+    def test_auth_status_without_session_still_returns_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_cli("auth", "status", env={"HI_CONFIG_DIR": tmp})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["session_exists"])
+        self.assertFalse(payload["has_access_token"])
+        self.assertFalse(payload["has_refresh_token"])
+
     def test_auth_status_does_not_expose_auth_env_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             auth_env = Path(tmp) / "auth.env"
