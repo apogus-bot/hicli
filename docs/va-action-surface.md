@@ -34,7 +34,6 @@ Concise command map for the customer-facing HomeInsight assistant CLI.
 - `blog publish <id>` — publish a post
 - `blog send-test <id> [...]` — send a test email for a post
 - `blog send-campaign <id> --audience ... [...]` — send the full campaign
-- `weekly/run_weekly.py <manifest> [--dry-run]` — wrapper for the full weekly blog/email workflow
 
 ## Expected VA behavior
 

@@ -6,10 +6,6 @@ Standalone product repo for the HomeInsight command line client and optional wee
 
 - `bin/hi-homeinsight` — main CLI
 - `bin/hi-homeinsight-dev` — compatibility shim
-- `lib/hi_blog_create.py` — blog payload helper
-- `weekly/run_weekly.py` — optional blog/email workflow wrapper
-- `weekly/examples/` — example auth and manifest files
-- `docs/va-action-surface.md` — concise customer-facing command/action map
 
 ## Keep local only
 
@@ -26,7 +22,7 @@ The CLI locks `~/.config/hi-cli-homeinsight/` to `0700` and session/cookie files
 ## Quick start
 
 ```bash
-chmod +x bin/hi-homeinsight weekly/run_weekly.py
+chmod +x bin/hi-homeinsight
 ln -sf "$PWD/bin/hi-homeinsight" "$HOME/bin/hi-homeinsight"
 ```
 
@@ -34,8 +30,7 @@ ln -sf "$PWD/bin/hi-homeinsight" "$HOME/bin/hi-homeinsight"
 
 ```bash
 mkdir -p ~/.config/hi-cli-homeinsight
-cp weekly/examples/auth.env.example ~/.config/hi-cli-homeinsight/auth.env
-chmod 600 ~/.config/hi-cli-homeinsight/auth.env
+chmod 700 ~/.config/hi-cli-homeinsight
 ```
 
 Then:
@@ -44,6 +39,8 @@ Then:
 bin/hi-homeinsight auth status
 bin/hi-homeinsight auth ensure
 ```
+
+Create `~/.config/hi-cli-homeinsight/auth.env` locally if you want the CLI to load default auth values from disk.
 
 Passwords are no longer accepted via `--password` to avoid leaking credentials through shell history or process lists. Put `HI_PASSWORD` in the local auth env file (or export it only in a trusted local shell session).
 
@@ -56,10 +53,4 @@ Passwords are no longer accepted via `--password` to avoid leaking credentials t
 - `HI_CONFIG_DIR`
 - `HI_AUTH_ENV_FILE`
 - `HI_CLI_BIN`
-
-## Weekly runner
-
-```bash
-weekly/run_weekly.py weekly/examples/weekly-input.example.json --dry-run
-```
 

@@ -33,10 +33,19 @@ class PublicSurfaceTests(unittest.TestCase):
             "cmd_sync()",
             "cmd_health()",
             "cmd_api()",
+            "HI_HELPER_PY",
+            "lib/hi_blog_create.py",
+            "weekly/run_weekly.py",
+            "weekly/examples",
         ]
         for item in forbidden:
             with self.subTest(item=item):
                 self.assertNotIn(item, cli)
+
+    def test_removed_assets_do_not_exist(self):
+        self.assertFalse((REPO_ROOT / "lib" / "hi_blog_create.py").exists())
+        self.assertFalse((REPO_ROOT / "weekly" / "run_weekly.py").exists())
+        self.assertFalse((REPO_ROOT / "weekly" / "examples").exists())
 
 
 if __name__ == "__main__":

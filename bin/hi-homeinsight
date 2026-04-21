@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-HI_HELPER_PY="${HI_HELPER_PY:-${REPO_ROOT}/lib/hi_blog_create.py}"
 
 HI_CONFIG_DIR="${HI_CONFIG_DIR:-${HOME}/.config/hi-cli-homeinsight}"
 HI_SESSION="${HI_CONFIG_DIR}/session.json"
@@ -41,6 +40,40 @@ write_secure_json() {
   local path="$1" payload="$2"
   printf '%s\n' "$payload" > "$path"
   secure_file "$path"
+}
+
+build_blog_create_payload() {
+  local title="" content_file="" slug="" excerpt="" tags="" meta_title="" meta_description="" featured_image_url=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --title) title="$2"; shift 2 ;;
+      --content-file) content_file="$2"; shift 2 ;;
+      --slug) slug="$2"; shift 2 ;;
+      --excerpt) excerpt="$2"; shift 2 ;;
+      --tags) tags="$2"; shift 2 ;;
+      --meta-title) meta_title="$2"; shift 2 ;;
+      --meta-description) meta_description="$2"; shift 2 ;;
+      --featured-image-url) featured_image_url="$2"; shift 2 ;;
+      *) err "Unknown arg for hi blog create: $1" ;;
+    esac
+  done
+
+  [[ -n "$title" ]] || err "Title is required"
+  [[ -n "$content_file" ]] || err "Content file is required"
+  [[ -f "$content_file" ]] || err "Content file not found: $content_file"
+
+  local payload='{}'
+  payload=$(jq --arg v "$title" '.title=$v' <<<"$payload")
+  payload=$(jq --rawfile v "$content_file" '.content=$v' <<<"$payload")
+  [[ -n "$slug" ]] && payload=$(jq --arg v "$slug" '.slug=$v' <<<"$payload")
+  [[ -n "$excerpt" ]] && payload=$(jq --arg v "$excerpt" '.excerpt=$v' <<<"$payload")
+  [[ -n "$featured_image_url" ]] && payload=$(jq --arg v "$featured_image_url" '.featured_image_url=$v' <<<"$payload")
+  [[ -n "$meta_title" ]] && payload=$(jq --arg v "$meta_title" '.meta_title=$v' <<<"$payload")
+  [[ -n "$meta_description" ]] && payload=$(jq --arg v "$meta_description" '.meta_description=$v' <<<"$payload")
+  if [[ -n "$tags" ]]; then
+    payload=$(jq --argjson v "$tags" '.tags=$v' <<<"$payload")
+  fi
+  printf '%s\n' "$payload"
 }
 
 prompt_for_password() {
@@ -368,13 +401,9 @@ cmd_blog() {
     create)
       shift || true
       local payload
-      payload=$(python3 "$HI_HELPER_PY" "$@")
-      if echo "$payload" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'error' not in d else 1)" 2>/dev/null; then
-         ensure_auth_token
-         curl -s -X POST -b "$HI_COOKIES"            -H "Content-Type: application/json"            -d "$payload" "${HI_APP}/api/blog" | pretty
-      else
-         err "$payload"
-      fi
+      payload=$(build_blog_create_payload "$@")
+      ensure_auth_token
+      curl -s -X POST -b "$HI_COOKIES" -H "Content-Type: application/json" -d "$payload" "${HI_APP}/api/blog" | pretty
       ;;
     update)
       [[ -z "${2:-}" ]] && err "Usage: hi blog update <ID> [fields...]"
