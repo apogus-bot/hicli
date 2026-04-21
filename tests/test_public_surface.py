@@ -22,6 +22,8 @@ class PublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("Only enable them for trusted internal workflows", readme)
         self.assertNotIn("optional weekly runner", readme)
         self.assertNotIn("blog", readme.lower())
+        self.assertIn("Property-backed package workflow", readme)
+        self.assertIn("buyer_review", readme)
 
     def test_public_cli_source_omits_admin_helpers_and_markers(self):
         cli = CLI.read_text(encoding="utf-8")

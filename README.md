@@ -86,6 +86,45 @@ hi-homeinsight properties update <id> --file payload.json
 cat payload.json | hi-homeinsight offers submit <property_id>
 ```
 
+## Property-backed package workflow
+
+HomeInsight packages are **property-backed**.
+
+### Listing prep flow
+
+1. Create a draft property with `properties create`
+   - or create a listing-prep package and use its returned `property_id`
+2. Upload photos/documents to that property while it is still draft
+3. Publish/release later when the listing is ready
+
+Example:
+
+```bash
+hi-homeinsight properties create --json '{"address":"123 Main St","city":"San Jose","state":"CA","zip":"95112"}'
+hi-homeinsight documents upload --property <property_id> --file disclosure.pdf --type disclosure
+hi-homeinsight photos save --property <property_id> --file front.jpg
+```
+
+### Buyer review flow
+
+`packages create` with `package_type: "buyer_review"` can auto-create a shell property in draft mode.
+
+That means the normal workflow is:
+
+1. Create buyer package
+2. Read the returned `property_id`
+3. Upload buyer-review documents to that property
+4. Optionally save photos against that same property record if needed
+
+Example:
+
+```bash
+hi-homeinsight packages create --json '{"title":"123 Main St Buyer Review","package_type":"buyer_review","property_address":"123 Main St","property_city":"San Jose","property_state":"CA","property_zip":"95112"}'
+hi-homeinsight documents upload --property <property_id> --file inspection.pdf --type inspection_report
+```
+
+So even when something is not live on-market yet, it still exists as a **draft property/listing record** that photos and documents attach to.
+
 ## Config overrides
 
 - `HI_APP`

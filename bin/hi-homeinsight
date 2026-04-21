@@ -1156,6 +1156,8 @@ AGENT / TEAM:
 
 NOTES:
   - JSON body commands accept: --json '<payload>', --file payload.json, or stdin
+  - Listing prep flow: create a property (or create a package that returns property_id), then upload photos/documents to that property while it stays in draft
+  - Buyer review packages can auto-create a shell draft property; use the returned property_id for document upload and optional photo save workflows
   - Secrets stay local in ~/.config/hi-cli-homeinsight/
   - This public CLI intentionally excludes admin, cron, sync, webhook, and blog surfaces
 EOF

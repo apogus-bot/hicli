@@ -64,11 +64,20 @@ Concise command map for the public, agent-facing HomeInsight CLI.
 
 - `packages list` — list document packages with stats
 - `packages get <package_id>` — fetch package details
-- `packages create` — create package from JSON payload
+- `packages create` — create package from JSON payload; returns `property_id` when a shell/draft property is created or attached
 - `packages update <package_id>` — patch package metadata
 - `packages co-agent add|get|revoke|accept|decline` — manage co-agent collaboration
 - `packages share <property_id>` — create package share link
 - `packages analytics <property_id>` — package/share analytics
+
+## Package upload model
+
+- Packages are **property-backed**, not a separate upload bucket.
+- Listing prep flow: create/attach a draft property, then upload photos and documents to that property.
+- Buyer review flow: `packages create` can auto-create a shell draft property and return `property_id`.
+- Use that returned `property_id` with:
+  - `documents upload --property <property_id> --file ...`
+  - `photos save --property <property_id> --file ...`
 
 ## Offers
 
