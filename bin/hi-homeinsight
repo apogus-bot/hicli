@@ -9,10 +9,10 @@ HI_SESSION="${HI_CONFIG_DIR}/session.json"
 HI_COOKIES="${HI_CONFIG_DIR}/cookies.txt"
 HI_APP="${HI_APP:-https://www.homeinsightai.com}"
 HI_SUPABASE="${HI_SUPABASE:-https://frausqlhhuparacxpyrv.supabase.co}"
-HI_ANON_KEY="${HI_ANON_KEY:-sb_publishable_ZjXRHkIzpMbAx87N7OzCiQ_lLLqKPf_}"
+HI_ANON_KEY="${HI_ANON_KEY:-}"
 HI_DEFAULT_EMAIL="${HI_DEFAULT_EMAIL:-}"
 HI_EMAIL="${HI_EMAIL:-}"
-HI_PASSWORD="${HI_PASSWORD:-}"
+HI_PASSWORD="$(printenv HI_PASSWORD 2>/dev/null || true)"
 HI_AUTH_ENV_FILE="${HI_AUTH_ENV_FILE:-${HI_CONFIG_DIR}/auth.env}"
 HI_REF="${HI_REF:-frausqlhhuparacxpyrv}"
 
@@ -42,38 +42,8 @@ write_secure_json() {
   secure_file "$path"
 }
 
-build_blog_create_payload() {
-  local title="" content_file="" slug="" excerpt="" tags="" meta_title="" meta_description="" featured_image_url=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --title) title="$2"; shift 2 ;;
-      --content-file) content_file="$2"; shift 2 ;;
-      --slug) slug="$2"; shift 2 ;;
-      --excerpt) excerpt="$2"; shift 2 ;;
-      --tags) tags="$2"; shift 2 ;;
-      --meta-title) meta_title="$2"; shift 2 ;;
-      --meta-description) meta_description="$2"; shift 2 ;;
-      --featured-image-url) featured_image_url="$2"; shift 2 ;;
-      *) err "Unknown arg for hi blog create: $1" ;;
-    esac
-  done
-
-  [[ -n "$title" ]] || err "Title is required"
-  [[ -n "$content_file" ]] || err "Content file is required"
-  [[ -f "$content_file" ]] || err "Content file not found: $content_file"
-
-  local payload='{}'
-  payload=$(jq --arg v "$title" '.title=$v' <<<"$payload")
-  payload=$(jq --rawfile v "$content_file" '.content=$v' <<<"$payload")
-  [[ -n "$slug" ]] && payload=$(jq --arg v "$slug" '.slug=$v' <<<"$payload")
-  [[ -n "$excerpt" ]] && payload=$(jq --arg v "$excerpt" '.excerpt=$v' <<<"$payload")
-  [[ -n "$featured_image_url" ]] && payload=$(jq --arg v "$featured_image_url" '.featured_image_url=$v' <<<"$payload")
-  [[ -n "$meta_title" ]] && payload=$(jq --arg v "$meta_title" '.meta_title=$v' <<<"$payload")
-  [[ -n "$meta_description" ]] && payload=$(jq --arg v "$meta_description" '.meta_description=$v' <<<"$payload")
-  if [[ -n "$tags" ]]; then
-    payload=$(jq --argjson v "$tags" '.tags=$v' <<<"$payload")
-  fi
-  printf '%s\n' "$payload"
+require_runtime_config() {
+  [[ -n "$HI_ANON_KEY" ]] || err "HI_ANON_KEY is required. Set it in your local auth env or shell environment."
 }
 
 prompt_for_password() {
@@ -87,9 +57,68 @@ prompt_for_password() {
   printf '%s' "$entered"
 }
 
-secure_dir "$HI_CONFIG_DIR"
+json_escape() {
+  jq -rn --arg v "$1" '$v'
+}
 
-# --- Auth ---
+urlencode() {
+  jq -rn --arg v "$1" '$v|@uri'
+}
+
+mime_type_for_file() {
+  local file="$1"
+  file --mime-type -b "$file"
+}
+
+base64_no_wrap() {
+  local file="$1"
+  base64 -w 0 "$file"
+}
+
+read_json_from_args_or_stdin() {
+  local explicit="${1:-}"
+  local file_path="${2:-}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  if [[ -n "$file_path" ]]; then
+    [[ -f "$file_path" ]] || err "JSON file not found: $file_path"
+    cat "$file_path"
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    cat
+    return 0
+  fi
+  printf '{}\n'
+}
+
+parse_json_flags() {
+  local json_arg='' json_file=''
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_arg="$2"; shift 2 ;;
+      --file) json_file="$2"; shift 2 ;;
+      *) err "Unknown JSON arg: $1" ;;
+    esac
+  done
+  read_json_from_args_or_stdin "$json_arg" "$json_file"
+}
+
+ensure_json() {
+  jq -e . >/dev/null 2>&1 <<<"$1" || err "Invalid JSON payload"
+}
+
+session_access_token() {
+  [[ -f "$HI_SESSION" ]] || err "Not logged in"
+  jq -r '.access_token // empty' "$HI_SESSION"
+}
+
+current_user_id() {
+  [[ -f "$HI_SESSION" ]] || err "Not logged in"
+  jq -r '.user_id // empty' "$HI_SESSION"
+}
 
 load_auth_env() {
   if [[ "${HI_AUTH_ENV_LOADED:-0}" == "1" ]]; then
@@ -110,8 +139,9 @@ load_auth_env() {
   fi
 
   HI_EMAIL="${HI_EMAIL:-$HI_DEFAULT_EMAIL}"
-  HI_PASSWORD="${HI_PASSWORD:-}"
 }
+
+secure_dir "$HI_CONFIG_DIR"
 
 auth_summary_json() {
   load_auth_env
@@ -130,11 +160,20 @@ auth_summary_json() {
     if jq -e '.refresh_token // empty' "$HI_SESSION" >/dev/null 2>&1; then has_refresh_token=true; fi
   fi
 
-  jq -n     --argjson session_exists "$session_exists"     --arg email "$email"     --argjson expires_at "$expires_at"     --argjson expired "$expired"     --argjson has_access_token "$has_access_token"     --argjson has_refresh_token "$has_refresh_token"     --argjson has_password_env "$(if [[ -n "$HI_PASSWORD" ]]; then echo true; else echo false; fi)"     --argjson auth_env_file_present "$(if [[ -f "$HI_AUTH_ENV_FILE" ]]; then echo true; else echo false; fi)"     '{session_exists:$session_exists,email:($email|select(. != "")),expires_at:$expires_at,expired:$expired,has_access_token:$has_access_token,has_refresh_token:$has_refresh_token,has_password_env:$has_password_env,auth_env_file_present:$auth_env_file_present}'
+  jq -n \
+    --argjson session_exists "$session_exists" \
+    --arg email "$email" \
+    --argjson expires_at "$expires_at" \
+    --argjson expired "$expired" \
+    --argjson has_access_token "$has_access_token" \
+    --argjson has_refresh_token "$has_refresh_token" \
+    --argjson has_password_env "$(if [[ -n "$HI_PASSWORD" ]]; then echo true; else echo false; fi)" \
+    --argjson auth_env_file_present "$(if [[ -f "$HI_AUTH_ENV_FILE" ]]; then echo true; else echo false; fi)" \
+    '{session_exists:$session_exists,email:($email|select(. != "")),expires_at:$expires_at,expired:$expired,has_access_token:$has_access_token,has_refresh_token:$has_refresh_token,has_password_env:$has_password_env,auth_env_file_present:$auth_env_file_present}'
 }
 
-# --- Token-based auth (OAuth passthrough) ---
 do_token_refresh() {
+  require_runtime_config
   local refresh_tok
   refresh_tok=$(jq -r '.refresh_token // empty' "$HI_SESSION" 2>/dev/null)
   if [[ -z "$refresh_tok" ]]; then return 1; fi
@@ -142,14 +181,29 @@ do_token_refresh() {
   res=$(curl -s -X POST "${HI_SUPABASE}/auth/v1/token?grant_type=refresh_token" \
     -H "apikey: ${HI_ANON_KEY}" -H "Content-Type: application/json" \
     -d "{\"refresh_token\":\"${refresh_tok}\"}")
-  if echo "$res" | jq -e '.access_token' &>/dev/null; then
-    write_secure_json "$HI_SESSION" "$(echo "$res" | jq '{access_token:.access_token,refresh_token:.refresh_token,
-      expires_at:.expires_at,email:(.user.email//.email),
-      user_id:(.user.id//.user_id),role:(.user.role//"authenticated")}')"
+  if echo "$res" | jq -e '.access_token' >/dev/null 2>&1; then
+    write_secure_json "$HI_SESSION" "$(echo "$res" | jq '{access_token:.access_token,refresh_token:.refresh_token,expires_at:.expires_at,email:(.user.email//.email),user_id:(.user.id//.user_id),role:(.user.role//"authenticated")}')"
     return 0
   fi
   return 1
 }
+
+_build_cookies_from_token() {
+  local full_session
+  full_session=$(jq -c '.' "$HI_SESSION" 2>/dev/null || echo "{}")
+  local b64="base64-$(echo -n "$full_session" | base64 -w 0)"
+  local len=${#b64} i=0 n=0
+  rm -f "$HI_COOKIES"
+  while (( i < len )); do
+    local chunk="${b64:$i:3600}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      'www.homeinsightai.com' 'TRUE' '/' 'TRUE' '2147483647' \
+      "sb-${HI_REF}-auth-token.${n}" "${chunk}" >> "$HI_COOKIES"
+    i=$(( i + 3600 )); n=$(( n + 1 ))
+  done
+  secure_file "$HI_COOKIES"
+}
+
 ensure_auth_token() {
   load_auth_env
   if [[ -f "$HI_SESSION" ]]; then
@@ -171,34 +225,9 @@ ensure_auth_token() {
   fi
   do_login "$HI_EMAIL" "$HI_PASSWORD"
 }
-_build_cookies_from_token() {
-  local full_session
-  full_session=$(jq -c '.' "$HI_SESSION" 2>/dev/null || echo "{}")
-  local b64="base64-$(echo -n "$full_session" | base64 -w 0)"
-  local len=${#b64} i=0 n=0
-  rm -f "$HI_COOKIES"
-  while (( i < len )); do
-    local chunk="${b64:$i:3600}"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      'www.homeinsightai.com' 'TRUE' '/' 'TRUE' '2147483647' \
-      "sb-frausqlhhuparacxpyrv-auth-token.${n}" "${chunk}" >> "$HI_COOKIES"
-    i=$(( i + 3600 )); n=$(( n + 1 ))
-  done
-  secure_file "$HI_COOKIES"
-}
-ensure_auth() {
-  load_auth_env
-  # Check if cookies are fresh (< 50 min old)
-  if [[ -f "$HI_COOKIES" ]]; then
-    local age=$(( $(date +%s) - $(stat -c %Y "$HI_COOKIES" 2>/dev/null || echo 0) ))
-    if (( age < 3000 )); then
-      return 0
-    fi
-  fi
-  do_login "$HI_EMAIL" "$HI_PASSWORD"
-}
 
 do_login() {
+  require_runtime_config
   load_auth_env
   local email="${1:-$HI_EMAIL}" pass="${2:-$HI_PASSWORD}"
   [[ -n "$email" ]] || err "Email is required. Set HI_EMAIL or use --email."
@@ -207,75 +236,82 @@ do_login() {
   fi
   info "Authenticating as ${email}..."
 
-  local res=$(curl -s -X POST "${HI_SUPABASE}/auth/v1/token?grant_type=password" \
+  local res
+  res=$(curl -s -X POST "${HI_SUPABASE}/auth/v1/token?grant_type=password" \
     -H "apikey: ${HI_ANON_KEY}" \
     -H "Content-Type: application/json" \
     -d "{\"email\":\"${email}\",\"password\":\"${pass}\"}")
 
-  if ! echo "$res" | jq -e '.access_token' &>/dev/null; then
-    local msg=$(echo "$res" | jq -r '.error_description // .msg // .error // "Unknown error"')
+  if ! echo "$res" | jq -e '.access_token' >/dev/null 2>&1; then
+    local msg
+    msg=$(echo "$res" | jq -r '.error_description // .msg // .error // "Unknown error"')
     err "Login failed: ${msg}"
   fi
 
-  # Save session
-  write_secure_json "$HI_SESSION" "$(echo "$res" | jq '{
-    access_token: .access_token,
-    refresh_token: .refresh_token,
-    expires_at: .expires_at,
-    email: .user.email,
-    user_id: .user.id,
-    role: .user.role
-  }')"
-
-  # Build Supabase SSR cookies (base64-<b64> chunked at 3600 chars)
-  local b64="base64-$(echo -n "$res" | base64 -w 0)"
-  local len=${#b64} i=0 n=0
-  > "$HI_COOKIES"
-  while (( i < len )); do
-    echo "www.homeinsightai.com	FALSE	/	TRUE	0	sb-${HI_REF}-auth-token.${n}	${b64:$i:3600}" >> "$HI_COOKIES"
-    (( i += 3600 )) || true
-    (( n++ )) || true
-  done
-  secure_file "$HI_COOKIES"
-
+  write_secure_json "$HI_SESSION" "$(echo "$res" | jq '{access_token:.access_token,refresh_token:.refresh_token,expires_at:.expires_at,email:.user.email,user_id:.user.id,role:.user.role}')"
+  _build_cookies_from_token
   ok "Logged in as ${email}"
 }
 
-# --- API helpers ---
-
-api_get() {
+api_request() {
+  local method="$1" path="$2" data="${3:-}"
+  require_runtime_config
   ensure_auth_token
-  local path="$1"; shift
-  curl -s -b "$HI_COOKIES" "${HI_APP}/api${path}" "$@"
+  local args=(-s -X "$method" -b "$HI_COOKIES")
+  if [[ -n "$data" ]]; then
+    args+=( -H "Content-Type: application/json" -d "$data" )
+  fi
+  curl "${args[@]}" "${HI_APP}/api${path}"
 }
 
-api_post() {
+api_get() { api_request GET "$1"; }
+api_post() { api_request POST "$1" "${2:-}"; }
+api_put() { api_request PUT "$1" "${2:-}"; }
+api_patch() { api_request PATCH "$1" "${2:-}"; }
+api_delete() { api_request DELETE "$1" "${2:-}"; }
+
+api_upload_file() {
+  local path="$1" file_path="$2" field_name="${3:-file}"
+  shift 3 || true
+  require_runtime_config
   ensure_auth_token
-  local path="$1" data="${2:-{}}"
-  curl -s -X POST -b "$HI_COOKIES" \
-    -H "Content-Type: application/json" \
-    -d "$data" "${HI_APP}/api${path}"
+  [[ -f "$file_path" ]] || err "File not found: $file_path"
+  local args=(-s -X POST -b "$HI_COOKIES" -F "${field_name}=@${file_path}")
+  while [[ $# -gt 1 ]]; do
+    args+=( -F "$1=$2" )
+    shift 2 || true
+  done
+  curl "${args[@]}" "${HI_APP}/api${path}"
 }
 
 sb_get() {
+  require_runtime_config
   ensure_auth_token
-  local path="$1"; shift
-  local token=$(jq -r '.access_token' "$HI_SESSION")
-  curl -s -H "apikey: ${HI_ANON_KEY}" \
+  local path="$1"
+  local token
+  token=$(session_access_token)
+  curl -s \
+    -H "apikey: ${HI_ANON_KEY}" \
     -H "Authorization: Bearer ${token}" \
-    "${HI_SUPABASE}/rest/v1/${path}" "$@"
+    "${HI_SUPABASE}/rest/v1/${path}"
 }
 
-# --- Commands ---
+profile_get_json() {
+  local uid
+  uid=$(current_user_id)
+  local encoded_uid
+  encoded_uid=$(urlencode "$uid")
+  sb_get "users?id=eq.${encoded_uid}&select=id,email,full_name,phone,bio,roles,zip_code,avatar_url,agent_license_number,agent_license_state,created_at,updated_at" | pretty
+}
 
 cmd_login() {
   load_auth_env
   local email="$HI_EMAIL" pass="$HI_PASSWORD"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --email) email="$2"; shift 2;;
-      --password) err "Passing --password is disabled. Put HI_PASSWORD in your local auth env instead.";;
-      *) shift;;
+      --email) email="$2"; shift 2 ;;
+      --password) err "Passing --password is disabled. Put HI_PASSWORD in your local auth env instead." ;;
+      *) err "Unknown arg for hi login: $1" ;;
     esac
   done
   do_login "$email" "$pass"
@@ -297,206 +333,851 @@ cmd_auth() {
 
 cmd_whoami() {
   [[ -f "$HI_SESSION" ]] || err "Not logged in"
-  jq '{email, user_id, role, expires_at: (.expires_at | todate)}' "$HI_SESSION"
+  jq '{email,user_id,role,expires_at}' "$HI_SESSION"
+}
+
+cmd_profile() {
+  local sub="${1:-get}"
+  shift || true
+  case "$sub" in
+    get)
+      profile_get_json
+      ;;
+    update)
+      local json_arg='' json_file=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json) json_arg="$2"; shift 2 ;;
+          --file) json_file="$2"; shift 2 ;;
+          *) err "Unknown arg for hi profile update: $1" ;;
+        esac
+      done
+      local body
+      body=$(read_json_from_args_or_stdin "$json_arg" "$json_file")
+      ensure_json "$body"
+      api_put "/profile" "$body" | pretty
+      ;;
+    avatar-upload)
+      local json_arg='' json_file=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --file-path) json_arg="{\"filePath\":$(json_escape "$2")}"; shift 2 ;;
+          --json) json_arg="$2"; shift 2 ;;
+          --file) json_file="$2"; shift 2 ;;
+          *) err "Unknown arg for hi profile avatar-upload: $1" ;;
+        esac
+      done
+      local body
+      body=$(read_json_from_args_or_stdin "$json_arg" "$json_file")
+      ensure_json "$body"
+      api_post "/profile/avatar" "$body" | pretty
+      ;;
+    avatar-remove)
+      api_delete "/profile/avatar" | pretty
+      ;;
+    load-area)
+      local action="${1:-get}"
+      shift || true
+      case "$action" in
+        get)
+          local uid
+          uid=$(current_user_id)
+          local encoded_uid
+          encoded_uid=$(urlencode "$uid")
+          sb_get "users?id=eq.${encoded_uid}&select=id,zip_code,last_area_load" | pretty
+          ;;
+        set)
+          [[ -n "${1:-}" ]] || err "Usage: hi profile load-area set <ZIP>"
+          jq -nc --arg zip "$1" '{full_name:"keep-existing-via-web-ui",zip_code:$zip}' >/dev/null 2>&1 || true
+          local current
+          current=$(sb_get "users?id=eq.$(urlencode "$(current_user_id)")&select=full_name,phone,bio,roles,agent_license_number,agent_license_state,zip_code" | jq '.[0] // {}')
+          local body
+          body=$(jq -n --arg zip "$1" --argjson cur "$current" '{full_name:($cur.full_name // "HomeInsight User"), phone:($cur.phone // null), bio:($cur.bio // null), zip_code:$zip, roles:($cur.roles // null), agent_license_number:($cur.agent_license_number // null), agent_license_state:($cur.agent_license_state // null)}')
+          api_put "/profile" "$body" | pretty
+          ;;
+        run)
+          api_post "/profile/load-area" '{}' | pretty
+          ;;
+        *) err "Unknown: hi profile load-area $action" ;;
+      esac
+      ;;
+    *) err "Unknown: hi profile $sub" ;;
+  esac
+}
+
+cmd_dashboard() {
+  local sub="${1:-summary}"
+  case "$sub" in
+    summary) api_get "/agent/dashboard-summary" | pretty ;;
+    activity) api_get "/agent/recent-activity" | pretty ;;
+    *) err "Unknown: hi dashboard $sub" ;;
+  esac
+}
+
+cmd_notifications() {
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
+    list)
+      local limit=20 unread_only=false offset=0
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --limit) limit="$2"; shift 2 ;;
+          --offset) offset="$2"; shift 2 ;;
+          --unread-only) unread_only=true; shift ;;
+          *) err "Unknown arg for hi notifications list: $1" ;;
+        esac
+      done
+      api_get "/notifications?limit=${limit}&offset=${offset}&unread_only=${unread_only}" | pretty
+      ;;
+    read)
+      [[ -n "${1:-}" ]] || err "Usage: hi notifications read <ID>"
+      api_patch "/notifications/${1}/read" '{}' | pretty
+      ;;
+    dismiss)
+      [[ -n "${1:-}" ]] || err "Usage: hi notifications dismiss <ID>"
+      api_delete "/notifications/${1}/read" | pretty
+      ;;
+    read-all)
+      api_post "/notifications/mark-all-read" '{}' | pretty
+      ;;
+    *) err "Unknown: hi notifications $sub" ;;
+  esac
 }
 
 cmd_properties() {
-  case "${1:-list}" in
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
     list)
-      local limit=20
-      shift 2>/dev/null || true
+      local limit=20 status='' seller_id=''
       while [[ $# -gt 0 ]]; do
-        case "$1" in --limit) limit="$2"; shift 2;; *) shift;; esac
+        case "$1" in
+          --limit) limit="$2"; shift 2 ;;
+          --status) status="$2"; shift 2 ;;
+          --seller-id) seller_id="$2"; shift 2 ;;
+          *) err "Unknown arg for hi properties list: $1" ;;
+        esac
       done
-      sb_get "properties?select=id,address,city,state,price,status,created_at&limit=${limit}&order=created_at.desc" | pretty
+      local qs="/properties?limit=${limit}"
+      [[ -n "$status" ]] && qs+="&status=$(urlencode "$status")"
+      [[ -n "$seller_id" ]] && qs+="&seller_id=$(urlencode "$seller_id")"
+      api_get "$qs" | pretty
       ;;
-    get) [[ -z "${2:-}" ]] && err "Usage: hi properties get <ID>"
-         api_get "/properties/${2}" | pretty;;
-    create) info "Reading JSON from stdin..."; api_post "/properties/quick-create" "$(cat)" | pretty;;
-    *) err "Unknown: hi properties $1";;
+    get)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties get <PROPERTY_ID>"
+      api_get "/properties/${1}" | pretty
+      ;;
+    create|quick-create)
+      local json_arg='' json_file=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json) json_arg="$2"; shift 2 ;;
+          --file) json_file="$2"; shift 2 ;;
+          *) err "Unknown arg for hi properties ${sub}: $1" ;;
+        esac
+      done
+      local body
+      body=$(read_json_from_args_or_stdin "$json_arg" "$json_file")
+      ensure_json "$body"
+      api_post "/properties/quick-create" "$body" | pretty
+      ;;
+    update)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties update <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local json_arg='' json_file=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json) json_arg="$2"; shift 2 ;;
+          --file) json_file="$2"; shift 2 ;;
+          *) err "Unknown arg for hi properties update: $1" ;;
+        esac
+      done
+      local body
+      body=$(read_json_from_args_or_stdin "$json_arg" "$json_file")
+      ensure_json "$body"
+      api_patch "/properties/${property_id}" "$body" | pretty
+      ;;
+    prefill)
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/prefill" "$body" | pretty
+      ;;
+    generate-content)
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/generate-content" "$body" | pretty
+      ;;
+    publish|unpublish|release|restore|mark-sold)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties ${sub} <PROPERTY_ID>"
+      local property_id="$1"
+      local route=''
+      case "$sub" in
+        publish) route="/properties/${property_id}/publish" ;;
+        unpublish) route="/properties/${property_id}/unpublish" ;;
+        release) route="/properties/${property_id}/release-to-market" ;;
+        restore) route="/properties/${property_id}/restore" ;;
+        mark-sold) route="/properties/${property_id}/mark-sold" ;;
+      esac
+      api_post "$route" '{}' | pretty
+      ;;
+    delete)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties delete <PROPERTY_ID>"
+      api_delete "/properties/${1}/delete" | pretty
+      ;;
+    analytics)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties analytics <PROPERTY_ID>"
+      api_get "/properties/${1}/analytics" | pretty
+      ;;
+    timeline)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties timeline <PROPERTY_ID>"
+      api_get "/properties/${1}/activity-timeline" | pretty
+      ;;
+    analysis)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties analysis <PROPERTY_ID>"
+      api_get "/properties/${1}/analysis" | pretty
+      ;;
+    chat)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties chat <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/chat" "$body" | pretty
+      ;;
+    cover-page)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties cover-page <PROPERTY_ID>"
+      api_get "/properties/${1}/cover-page" | pretty
+      ;;
+    cover-page-notes)
+      [[ -n "${1:-}" ]] || err "Usage: hi properties cover-page-notes <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_patch "/properties/${property_id}/cover-page-notes" "$body" | pretty
+      ;;
+    *) err "Unknown: hi properties $sub" ;;
   esac
 }
 
-cmd_leads() { api_get "/agents/leads" | pretty; }
+cmd_photos() {
+  local sub="${1:-stage}"
+  shift || true
+  case "$sub" in
+    stage)
+      local image_file='' style='' room_type='' custom_prompt=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --file) image_file="$2"; shift 2 ;;
+          --style) style="$2"; shift 2 ;;
+          --room-type) room_type="$2"; shift 2 ;;
+          --prompt) custom_prompt="$2"; shift 2 ;;
+          *) err "Unknown arg for hi photos stage: $1" ;;
+        esac
+      done
+      [[ -n "$image_file" && -f "$image_file" ]] || err "Usage: hi photos stage --file <IMAGE> --style <STYLE> [--room-type X] [--prompt X]"
+      [[ -n "$style" ]] || err "--style is required"
+      local mime image64 body
+      mime=$(mime_type_for_file "$image_file")
+      image64=$(base64_no_wrap "$image_file")
+      body=$(jq -n --arg imageBase64 "$image64" --arg mimeType "$mime" --arg style "$style" --arg roomType "$room_type" --arg customPrompt "$custom_prompt" '{imageBase64:$imageBase64,mimeType:$mimeType,style:$style} + (if $roomType != "" then {roomType:$roomType} else {} end) + (if $customPrompt != "" then {customPrompt:$customPrompt} else {} end)')
+      api_post "/photos/stage" "$body" | pretty
+      ;;
+    edit)
+      local image_file='' prompt=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --file) image_file="$2"; shift 2 ;;
+          --prompt) prompt="$2"; shift 2 ;;
+          *) err "Unknown arg for hi photos edit: $1" ;;
+        esac
+      done
+      [[ -n "$image_file" && -f "$image_file" ]] || err "Usage: hi photos edit --file <IMAGE> --prompt <TEXT>"
+      [[ -n "$prompt" ]] || err "--prompt is required"
+      local mime image64 body
+      mime=$(mime_type_for_file "$image_file")
+      image64=$(base64_no_wrap "$image_file")
+      body=$(jq -n --arg imageBase64 "$image64" --arg mimeType "$mime" --arg prompt "$prompt" '{imageBase64:$imageBase64,mimeType:$mimeType,prompt:$prompt}')
+      api_post "/photos/edit" "$body" | pretty
+      ;;
+    save)
+      local property_id='' image_file='' mode='append' replace_index='' source='ai'
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --property) property_id="$2"; shift 2 ;;
+          --file) image_file="$2"; shift 2 ;;
+          --mode) mode="$2"; shift 2 ;;
+          --replace-index) replace_index="$2"; shift 2 ;;
+          --source) source="$2"; shift 2 ;;
+          *) err "Unknown arg for hi photos save: $1" ;;
+        esac
+      done
+      [[ -n "$property_id" && -n "$image_file" && -f "$image_file" ]] || err "Usage: hi photos save --property <PROPERTY_ID> --file <IMAGE> [--mode append|replace] [--replace-index N] [--source ai]"
+      local mime image64 body
+      mime=$(mime_type_for_file "$image_file")
+      image64=$(base64_no_wrap "$image_file")
+      body=$(jq -n --arg imageBase64 "$image64" --arg mimeType "$mime" --arg mode "$mode" --arg source "$source" --arg replaceIndex "$replace_index" '{imageBase64:$imageBase64,mimeType:$mimeType,mode:$mode,source:$source} + (if $replaceIndex != "" then {replaceIndex:($replaceIndex|tonumber)} else {} end)')
+      api_post "/properties/${property_id}/photos/save" "$body" | pretty
+      ;;
+    manage)
+      local property_id='' action='' photos_json='' delete_index='' primary_index=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --property) property_id="$2"; shift 2 ;;
+          --action) action="$2"; shift 2 ;;
+          --photos) photos_json="$2"; shift 2 ;;
+          --delete-index) delete_index="$2"; shift 2 ;;
+          --primary-index) primary_index="$2"; shift 2 ;;
+          *) err "Unknown arg for hi photos manage: $1" ;;
+        esac
+      done
+      [[ -n "$property_id" && -n "$action" ]] || err "Usage: hi photos manage --property <PROPERTY_ID> --action reorder|delete|set_primary [...]"
+      local body='{}'
+      body=$(jq --arg action "$action" '.action=$action' <<<"$body")
+      [[ -n "$photos_json" ]] && body=$(jq --argjson photos "$photos_json" '.photos=$photos' <<<"$body")
+      [[ -n "$delete_index" ]] && body=$(jq --arg v "$delete_index" '.deleteIndex=($v|tonumber)' <<<"$body")
+      [[ -n "$primary_index" ]] && body=$(jq --arg v "$primary_index" '.primaryIndex=($v|tonumber)' <<<"$body")
+      api_patch "/properties/${property_id}/photos/manage" "$body" | pretty
+      ;;
+    *) err "Unknown: hi photos $sub" ;;
+  esac
+}
+
+cmd_documents() {
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
+    list)
+      local property_id=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --property) property_id="$2"; shift 2 ;;
+          *) err "Unknown arg for hi documents list: $1" ;;
+        esac
+      done
+      if [[ -n "$property_id" ]]; then
+        api_get "/properties/${property_id}/documents" | pretty
+      else
+        api_get "/documents/my-documents" | pretty
+      fi
+      ;;
+    shared-with-me|shared)
+      api_get "/documents/shared-with-me" | pretty
+      ;;
+    property-list)
+      api_get "/documents/property-list" | pretty
+      ;;
+    upload)
+      local property_id='' file_path='' doc_type='' title='' description='' is_public='false'
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --property) property_id="$2"; shift 2 ;;
+          --file) file_path="$2"; shift 2 ;;
+          --type) doc_type="$2"; shift 2 ;;
+          --title) title="$2"; shift 2 ;;
+          --description) description="$2"; shift 2 ;;
+          --public) is_public='true'; shift ;;
+          *) err "Unknown arg for hi documents upload: $1" ;;
+        esac
+      done
+      [[ -n "$property_id" && -n "$file_path" ]] || err "Usage: hi documents upload --property <PROPERTY_ID> --file <PATH> [--type TYPE] [--title T] [--description D] [--public]"
+      api_upload_file "/properties/${property_id}/documents/upload" "$file_path" file \
+        documentType "$doc_type" title "$title" description "$description" isPublicListingDoc "$is_public" | pretty
+      ;;
+    reorder)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents reorder <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/reorder" "$body" | pretty
+      ;;
+    analytics)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents analytics <PROPERTY_ID>"
+      api_get "/properties/${1}/documents/analytics" | pretty
+      ;;
+    download-all)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents download-all <PROPERTY_ID>"
+      api_get "/properties/${1}/documents/download-all" | pretty
+      ;;
+    share)
+      [[ -n "${1:-}" && -n "${2:-}" ]] || err "Usage: hi documents share <PROPERTY_ID> <DOC_ID> [--json ...|--file ...]"
+      local property_id="$1" doc_id="$2"
+      shift 2 || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/${doc_id}/share" "$body" | pretty
+      ;;
+    share-open)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents share-open <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/share-open" "$body" | pretty
+      ;;
+    share-multiple)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents share-multiple <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/share-multiple" "$body" | pretty
+      ;;
+    request-access)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents request-access <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/request-access" "$body" | pretty
+      ;;
+    access-requests)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents access-requests <PROPERTY_ID>"
+      api_get "/properties/${1}/documents/access/requests" | pretty
+      ;;
+    grant-access)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents grant-access <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/access/grant" "$body" | pretty
+      ;;
+    revoke-access)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents revoke-access <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/access/revoke" "$body" | pretty
+      ;;
+    package)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents package <PROPERTY_ID>"
+      api_get "/properties/${1}/documents/package" | pretty
+      ;;
+    share-package)
+      [[ -n "${1:-}" ]] || err "Usage: hi documents share-package <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/share-package" "$body" | pretty
+      ;;
+    *) err "Unknown: hi documents $sub" ;;
+  esac
+}
+
+cmd_packages() {
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
+    list)
+      local type='' property_id='' page='' limit=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --type) type="$2"; shift 2 ;;
+          --property) property_id="$2"; shift 2 ;;
+          --page) page="$2"; shift 2 ;;
+          --limit) limit="$2"; shift 2 ;;
+          *) err "Unknown arg for hi packages list: $1" ;;
+        esac
+      done
+      local qs="/document-packages"
+      local sep='?'
+      [[ -n "$type" ]] && qs+="${sep}type=$(urlencode "$type")" && sep='&'
+      [[ -n "$property_id" ]] && qs+="${sep}propertyId=$(urlencode "$property_id")" && sep='&'
+      [[ -n "$page" ]] && qs+="${sep}page=$(urlencode "$page")" && sep='&'
+      [[ -n "$limit" ]] && qs+="${sep}limit=$(urlencode "$limit")"
+      api_get "$qs" | pretty
+      ;;
+    get)
+      [[ -n "${1:-}" ]] || err "Usage: hi packages get <PACKAGE_ID>"
+      api_get "/document-packages/${1}" | pretty
+      ;;
+    create)
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/document-packages" "$body" | pretty
+      ;;
+    update)
+      [[ -n "${1:-}" ]] || err "Usage: hi packages update <PACKAGE_ID> [--json ...|--file ...]"
+      local package_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_patch "/document-packages/${package_id}" "$body" | pretty
+      ;;
+    co-agent)
+      local action="${1:-}"
+      shift || true
+      case "$action" in
+        add)
+          [[ -n "${1:-}" ]] || err "Usage: hi packages co-agent add <PACKAGE_ID> --email agent@example.com"
+          local package_id="$1"
+          shift || true
+          local email=''
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --email) email="$2"; shift 2 ;;
+              *) err "Unknown arg for hi packages co-agent add: $1" ;;
+            esac
+          done
+          [[ -n "$email" ]] || err "--email is required"
+          api_post "/document-packages/${package_id}/co-agent" "$(jq -n --arg email "$email" '{email:$email}')" | pretty
+          ;;
+        get)
+          [[ -n "${1:-}" ]] || err "Usage: hi packages co-agent get <PACKAGE_ID>"
+          api_get "/document-packages/${1}/co-agent" | pretty
+          ;;
+        revoke|remove)
+          [[ -n "${1:-}" ]] || err "Usage: hi packages co-agent revoke <PACKAGE_ID>"
+          api_delete "/document-packages/${1}/co-agent" | pretty
+          ;;
+        accept)
+          [[ -n "${1:-}" ]] || err "Usage: hi packages co-agent accept <PACKAGE_ID>"
+          api_post "/document-packages/${1}/co-agent/accept" '{}' | pretty
+          ;;
+        decline)
+          [[ -n "${1:-}" ]] || err "Usage: hi packages co-agent decline <PACKAGE_ID>"
+          api_post "/document-packages/${1}/co-agent/decline" '{}' | pretty
+          ;;
+        *) err "Unknown: hi packages co-agent $action" ;;
+      esac
+      ;;
+    share)
+      [[ -n "${1:-}" ]] || err "Usage: hi packages share <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/documents/share-package" "$body" | pretty
+      ;;
+    analytics)
+      [[ -n "${1:-}" ]] || err "Usage: hi packages analytics <PROPERTY_ID>"
+      api_get "/properties/${1}/documents/share-analytics" | pretty
+      ;;
+    *) err "Unknown: hi packages $sub" ;;
+  esac
+}
 
 cmd_offers() {
-  case "${1:-list}" in
-    list) [[ -z "${2:-}" ]] && err "Usage: hi offers list <PROPERTY_ID>"
-          api_get "/properties/${2}/offers" | pretty;;
-    get)  [[ -z "${2:-}" || -z "${3:-}" ]] && err "Usage: hi offers get <PROPERTY_ID> <OFFER_ID>"
-          api_get "/properties/${2}/offers/${3}" | pretty;;
-    respond) [[ -z "${2:-}" || -z "${3:-}" || -z "${4:-}" ]] && err "Usage: hi offers respond <PROP_ID> <OFFER_ID> '{\"action\":\"accept\"}'"
-          api_post "/properties/${2}/offers/${3}/respond" "${4}" | pretty;;
-    *) err "Unknown: hi offers $1";;
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
+    list)
+      [[ -n "${1:-}" ]] || err "Usage: hi offers list <PROPERTY_ID> [--status X] [--agent-id me]"
+      local property_id="$1"
+      shift || true
+      local status='' agent_id=''
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --status) status="$2"; shift 2 ;;
+          --agent-id) agent_id="$2"; shift 2 ;;
+          *) err "Unknown arg for hi offers list: $1" ;;
+        esac
+      done
+      local qs="/properties/${property_id}/offers"
+      local sep='?'
+      [[ -n "$status" ]] && qs+="${sep}status=$(urlencode "$status")" && sep='&'
+      [[ -n "$agent_id" ]] && qs+="${sep}agent_id=$(urlencode "$agent_id")"
+      api_get "$qs" | pretty
+      ;;
+    get)
+      [[ -n "${1:-}" && -n "${2:-}" ]] || err "Usage: hi offers get <PROPERTY_ID> <OFFER_ID>"
+      api_get "/properties/${1}/offers/${2}" | pretty
+      ;;
+    submit)
+      [[ -n "${1:-}" ]] || err "Usage: hi offers submit <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/offers" "$body" | pretty
+      ;;
+    respond)
+      [[ -n "${1:-}" && -n "${2:-}" ]] || err "Usage: hi offers respond <PROPERTY_ID> <OFFER_ID> [--json ...|--file ...]"
+      local property_id="$1" offer_id="$2"
+      shift 2 || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_put "/properties/${property_id}/offers/${offer_id}/respond" "$body" | pretty
+      ;;
+    accept|reject|counter|withdraw)
+      [[ -n "${1:-}" ]] || err "Usage: hi offers ${sub} <OFFER_ID> [--json ...|--file ...]"
+      local offer_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      local route=''
+      case "$sub" in
+        accept) route="/offers/${offer_id}/accept" ;;
+        reject) route="/offers/${offer_id}/reject" ;;
+        counter) route="/offers/${offer_id}/counter" ;;
+        withdraw) route="/offers/${offer_id}/withdraw" ;;
+      esac
+      api_post "$route" "$body" | pretty
+      ;;
+    schedule)
+      [[ -n "${1:-}" && -n "${2:-}" ]] || err "Usage: hi offers schedule <PROPERTY_ID> <OFFER_ID> [--json ...|--file ...]"
+      local property_id="$1" offer_id="$2"
+      shift 2 || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/offers/${offer_id}/schedule" "$body" | pretty
+      ;;
+    share)
+      [[ -n "${1:-}" ]] || err "Usage: hi offers share <PROPERTY_ID> [--json ...|--file ...]"
+      local property_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/properties/${property_id}/offers/share" "$body" | pretty
+      ;;
+    docs)
+      local action="${1:-list}"
+      shift || true
+      case "$action" in
+        list)
+          [[ -n "${1:-}" ]] || err "Usage: hi offers docs list <OFFER_ID>"
+          api_get "/offers/${1}/documents" | pretty
+          ;;
+        upload)
+          [[ -n "${1:-}" && -n "${2:-}" ]] || err "Usage: hi offers docs upload <OFFER_ID> <FILE>"
+          local offer_id="$1" file_path="$2"
+          api_upload_file "/offers/documents/upload?offerId=$(urlencode "$offer_id")" "$file_path" file | pretty
+          ;;
+        *) err "Unknown: hi offers docs $action" ;;
+      esac
+      ;;
+    *) err "Unknown: hi offers $sub" ;;
   esac
 }
 
-cmd_docs() {
-  case "${1:-list}" in
-    list)     api_get "/documents/my-documents" | pretty;;
-    shared)   api_get "/documents/shared-with-me" | pretty;;
-    packages) api_get "/document-packages" | pretty;;
-    upload)   [[ -z "${2:-}" ]] && err "Usage: hi docs upload <PROPERTY_ID> (file via stdin)"
-              info "Use the web UI for file uploads";;
-    analytics) [[ -z "${2:-}" || -z "${3:-}" ]] && err "Usage: hi docs analytics <PROPERTY_ID> <DOC_ID>"
-              api_get "/properties/${2}/documents/analytics" | pretty;;
-    *) err "Unknown: hi docs $1";;
+cmd_analysis() {
+  local sub="${1:-pending}"
+  shift || true
+  case "$sub" in
+    start)
+      [[ -n "${1:-}" ]] || err "Usage: hi analysis start <DOCUMENT_ID> [--json ...|--file ...]"
+      local document_id="$1"
+      shift || true
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/documents/${document_id}/analyze" "$body" | pretty
+      ;;
+    get)
+      [[ -n "${1:-}" ]] || err "Usage: hi analysis get <DOCUMENT_ID>"
+      api_get "/homeinsight/documents/${1}/analysis" | pretty
+      ;;
+    pending)
+      api_get "/homeinsight/analyses/pending" | pretty
+      ;;
+    stream)
+      [[ -n "${1:-}" ]] || err "Usage: hi analysis stream <ANALYSIS_ID>"
+      api_get "/homeinsight/analyses/${1}/stream" | pretty
+      ;;
+    issues)
+      [[ -n "${1:-}" ]] || err "Usage: hi analysis issues <ANALYSIS_ID>"
+      api_get "/homeinsight/document-analyses/${1}/issues" | pretty
+      ;;
+    *) err "Unknown: hi analysis $sub" ;;
+  esac
+}
+
+cmd_leads() {
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
+    list)
+      api_get "/agents/leads" | pretty
+      ;;
+    create)
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/leads" "$body" | pretty
+      ;;
+    *) err "Unknown: hi leads $sub" ;;
+  esac
+}
+
+cmd_companies() {
+  local sub="${1:-me}"
+  shift || true
+  case "$sub" in
+    me)
+      api_get "/companies/me" | pretty
+      ;;
+    create)
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/companies/create" "$body" | pretty
+      ;;
+    search)
+      [[ -n "${1:-}" ]] || err "Usage: hi companies search <QUERY>"
+      api_get "/companies/search?q=$(urlencode "$1")" | pretty
+      ;;
+    invite)
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/companies/invites" "$body" | pretty
+      ;;
+    requests)
+      local body
+      body=$(parse_json_flags "$@")
+      ensure_json "$body"
+      api_post "/companies/requests" "$body" | pretty
+      ;;
+    *) err "Unknown: hi companies $sub" ;;
+  esac
+}
+
+cmd_team() {
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
+    list)
+      local q='' status='all'
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --q) q="$2"; shift 2 ;;
+          --status) status="$2"; shift 2 ;;
+          *) err "Unknown arg for hi team list: $1" ;;
+        esac
+      done
+      api_get "/team-listings?q=$(urlencode "$q")&status=$(urlencode "$status")" | pretty
+      ;;
+    *) err "Unknown: hi team $sub" ;;
   esac
 }
 
 cmd_onboarding() {
-  api_post "/onboarding/complete" "${1:-{}}" | pretty
-}
-
-cmd_dashboard() {
-  api_get "/agent/dashboard-summary" | pretty
+  local body
+  body=$(parse_json_flags "$@")
+  ensure_json "$body"
+  api_post "/onboarding/complete" "$body" | pretty
 }
 
 cmd_help() {
-  cat <<EOF
+  cat <<'EOF'
 HomeInsight CLI
 
 USAGE: hi-homeinsight <command> [args]
 
-COMMANDS:
-  login [--email E]                  Authenticate (password comes from HI_PASSWORD or local auth env)
-  auth status | ensure               Inspect or refresh auth
-  whoami                             Current session info
-  properties list [--limit N]        List properties
-  properties get <ID>                Property details
-  properties create                  Create (JSON stdin)
-  leads                              List leads
-  offers list <PROP_ID>              List offers on property
-  offers get <PROP_ID> <OFFER_ID>    Get offer details
-  offers respond <P> <O> <JSON>      Respond to offer
-  docs list                          My documents
-  docs shared                        Shared with me
-  docs packages                      Document packages
-  docs analytics <PROP_ID> <DOC_ID>  Doc analytics
-  onboarding                         Complete onboarding
-  dashboard                          Agent dashboard summary
-  blog list [limit]                  List blog posts
-  blog get <ID_OR_SLUG>              Get blog post
-  blog create [--title T] ...        Create blog post
-  blog update <ID> [fields...]       Update blog post
-  blog publish <ID>                  Publish blog post
-  blog send-test <ID> [...]          Send test email
-  blog send-campaign <ID> [...]      Send campaign
+CORE:
+  login [--email E]                                Authenticate (password comes from HI_PASSWORD or local auth env)
+  auth status | ensure                             Inspect or refresh auth
+  whoami                                           Current session info
+  profile get | update | avatar-upload | load-area get | load-area set | load-area run
+
+DASHBOARD:
+  dashboard summary | activity
+  notifications list | read <ID> | read-all
+
+LISTINGS:
+  properties list [--limit N] [--status S]
+  properties get <ID>
+  properties create                                Quick-create from JSON stdin / --json / --file
+  properties update <ID>                           PATCH from JSON stdin / --json / --file
+  properties prefill                               Generate prefill payload from JSON
+  properties generate-content                      Generate listing copy from JSON
+  properties publish | unpublish | release | restore | mark-sold <ID>
+  properties delete <ID>
+  properties analytics | timeline | analysis | chat | cover-page | cover-page-notes <ID>
+
+PHOTOS:
+  photos stage | edit | save | manage
+
+DOCUMENTS:
+  documents list [--property ID]
+  documents upload --property ID --file PATH [--type TYPE] [--title T] [--description D] [--public]
+  documents reorder <PROPERTY_ID>
+  documents analytics <PROPERTY_ID>
+  documents download-all <PROPERTY_ID>
+  documents share <PROPERTY_ID> <DOC_ID>
+  documents share-open <PROPERTY_ID>
+  documents share-multiple <PROPERTY_ID>
+  documents request-access <PROPERTY_ID>
+  documents access-requests <PROPERTY_ID>
+  documents grant-access <PROPERTY_ID>
+  documents revoke-access <PROPERTY_ID>
+  documents shared-with-me
+
+PACKAGES:
+  packages list | get <ID> | create | update <ID>
+  packages co-agent add | get | revoke | accept | decline <ID>
+  packages share <PROPERTY_ID>
+  packages analytics <PROPERTY_ID>
+
+OFFERS:
+  offers list <PROPERTY_ID>
+  offers get <PROPERTY_ID> <OFFER_ID>
+  offers submit <PROPERTY_ID>
+  offers respond <PROPERTY_ID> <OFFER_ID>
+  offers accept | reject | counter | withdraw <OFFER_ID>
+  offers schedule <PROPERTY_ID> <OFFER_ID>
+  offers share <PROPERTY_ID>
+  offers docs list | upload
+
+ANALYSIS:
+  analysis start | get | pending | stream | issues
+
+AGENT / TEAM:
+  leads list | create
+  companies me | create | search | invite | requests
+  team list
+  onboarding                                        Complete onboarding flow from JSON
+
+NOTES:
+  - JSON body commands accept: --json '<payload>', --file payload.json, or stdin
+  - Secrets stay local in ~/.config/hi-cli-homeinsight/
+  - This public CLI intentionally excludes admin, cron, sync, webhook, and blog surfaces
 EOF
 }
 
-cmd_blog() {
-  ensure_auth_token
-  case "${1:-list}" in
-    list)
-      shift || true
-      local qs="/blog"
-      if [[ -n "${1:-}" ]]; then qs="${qs}?limit=${1}"; fi
-      api_get "$qs" | pretty
-      ;;
-    get)
-      [[ -z "${2:-}" ]] && err "Usage: hi blog get <ID_OR_SLUG>"
-      api_get "/blog/${2}" | pretty
-      ;;
-    create)
-      shift || true
-      local payload
-      payload=$(build_blog_create_payload "$@")
-      ensure_auth_token
-      curl -s -X POST -b "$HI_COOKIES" -H "Content-Type: application/json" -d "$payload" "${HI_APP}/api/blog" | pretty
-      ;;
-    update)
-      [[ -z "${2:-}" ]] && err "Usage: hi blog update <ID> [fields...]"
-      local id="$2" title="" slug="" excerpt="" tags="" meta_title="" meta_description="" content_file="" featured_image_url="" email_html_file="" email_subject=""
-      shift 2 || true
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --title) title="$2"; shift 2 ;;
-          --slug) slug="$2"; shift 2 ;;
-          --excerpt) excerpt="$2"; shift 2 ;;
-          --tags) tags="$2"; shift 2 ;;
-          --meta-title) meta_title="$2"; shift 2 ;;
-          --meta-description) meta_description="$2"; shift 2 ;;
-          --content-file) content_file="$2"; shift 2 ;;
-          --featured-image-url) featured_image_url="$2"; shift 2 ;;
-          --email-html-file) email_html_file="$2"; shift 2 ;;
-          --email-subject) email_subject="$2"; shift 2 ;;
-          *) err "Unknown arg for hi blog update: $1" ;;
-        esac
-      done
-      local payload='{}'
-      [[ -n "$title" ]] && payload=$(jq --arg v "$title" '.title=$v' <<<"$payload")
-      [[ -n "$slug" ]] && payload=$(jq --arg v "$slug" '.slug=$v' <<<"$payload")
-      [[ -n "$excerpt" ]] && payload=$(jq --arg v "$excerpt" '.excerpt=$v' <<<"$payload")
-      [[ -n "$featured_image_url" ]] && payload=$(jq --arg v "$featured_image_url" '.featured_image_url=$v' <<<"$payload")
-      [[ -n "$meta_title" ]] && payload=$(jq --arg v "$meta_title" '.meta_title=$v' <<<"$payload")
-      [[ -n "$meta_description" ]] && payload=$(jq --arg v "$meta_description" '.meta_description=$v' <<<"$payload")
-      [[ -n "$tags" ]] && payload=$(jq --argjson v "$tags" '.tags=$v' <<<"$payload")
-      if [[ -n "$content_file" ]]; then [[ -f "$content_file" ]] || err "Content file not found: $content_file"; payload=$(jq --rawfile v "$content_file" '.content=$v' <<<"$payload"); fi
-      if [[ -n "$email_html_file" ]]; then [[ -f "$email_html_file" ]] || err "Email file not found: $email_html_file"; payload=$(jq --rawfile v "$email_html_file" '.email_html=$v' <<<"$payload"); fi
-      [[ -n "$email_subject" ]] && payload=$(jq --arg v "$email_subject" '.email_subject=$v' <<<"$payload")
-      curl -s -X PATCH -b "$HI_COOKIES" -H "Content-Type: application/json" -d "$payload" "${HI_APP}/api/blog/${id}" | pretty
-      ;;
-    publish)
-      [[ -z "${2:-}" ]] && err "Usage: hi blog publish <ID>"
-      api_post "/blog/${2}/publish" '{}' | pretty
-      ;;
-    send-test)
-      [[ -z "${2:-}" ]] && err "Usage: hi blog send-test <ID> [--subject S] [--email-html-file file]"
-      local id="$2" subject="" email_html_file="" from_address=""
-      shift 2 || true
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --subject) subject="$2"; shift 2 ;;
-          --email-html-file) email_html_file="$2"; shift 2 ;;
-          --from) from_address="$2"; shift 2 ;;
-          *) err "Unknown arg for hi blog send-test: $1" ;;
-        esac
-      done
-      local payload='{}'
-      [[ -n "$subject" ]] && payload=$(jq --arg v "$subject" '.email_subject=$v' <<<"$payload")
-      [[ -n "$from_address" ]] && payload=$(jq --arg v "$from_address" '.from_address=$v' <<<"$payload")
-      if [[ -n "$email_html_file" ]]; then [[ -f "$email_html_file" ]] || err "Email file not found: $email_html_file"; payload=$(jq --rawfile v "$email_html_file" '.email_html=$v' <<<"$payload"); fi
-      api_post "/blog/${id}/send-test" "$payload" | pretty
-      ;;
-    send-campaign)
-      [[ -z "${2:-}" ]] && err "Usage: hi blog send-campaign <ID> --audience all_agents|clients|all_users|custom_list [--emails '[...]']"
-      local id="$2" audience="" emails="[]" subject="" email_html_file="" from_address=""
-      shift 2 || true
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --audience) audience="$2"; shift 2 ;;
-          --emails) emails="$2"; shift 2 ;;
-          --subject) subject="$2"; shift 2 ;;
-          --email-html-file) email_html_file="$2"; shift 2 ;;
-          --from) from_address="$2"; shift 2 ;;
-          *) err "Unknown arg for hi blog send-campaign: $1" ;;
-        esac
-      done
-      [[ -z "$audience" ]] && err "--audience is required"
-      local payload='{}'
-      payload=$(jq --arg v "$audience" '.audience=$v' <<<"$payload")
-      [[ -n "$subject" ]] && payload=$(jq --arg v "$subject" '.email_subject=$v' <<<"$payload")
-      [[ -n "$from_address" ]] && payload=$(jq --arg v "$from_address" '.from_address=$v' <<<"$payload")
-      [[ "$audience" == "custom_list" ]] && payload=$(jq --argjson v "$emails" '.emails=$v' <<<"$payload")
-      if [[ -n "$email_html_file" ]]; then [[ -f "$email_html_file" ]] || err "Email file not found: $email_html_file"; payload=$(jq --rawfile v "$email_html_file" '.email_html=$v' <<<"$payload"); fi
-      api_post "/blog/${id}/send-campaign" "$payload" | pretty
-      ;;
-    *) err "Unknown: hi blog $1" ;;
-  esac
-}
-
 case "${1:-help}" in
-  login) shift; cmd_login "$@";;
-  auth) shift; cmd_auth "$@";;
-  whoami) cmd_whoami;;
-  properties) shift; cmd_properties "$@";;
-  leads) cmd_leads;;
-  offers) shift; cmd_offers "$@";;
-  docs) shift; cmd_docs "$@";;
-  onboarding) shift; cmd_onboarding "$@";;
-  dashboard) cmd_dashboard;;
-  blog) shift; cmd_blog "$@";;
-  help|--help|-h) cmd_help;;
-  *) err "Unknown: $1 — run 'hi-homeinsight help'";;
+  login) shift; cmd_login "$@" ;;
+  auth) shift; cmd_auth "$@" ;;
+  whoami) cmd_whoami ;;
+  profile) shift; cmd_profile "$@" ;;
+  dashboard) shift; cmd_dashboard "$@" ;;
+  notifications) shift; cmd_notifications "$@" ;;
+  properties) shift; cmd_properties "$@" ;;
+  photos) shift; cmd_photos "$@" ;;
+  documents|docs) shift; cmd_documents "$@" ;;
+  packages) shift; cmd_packages "$@" ;;
+  offers) shift; cmd_offers "$@" ;;
+  analysis) shift; cmd_analysis "$@" ;;
+  leads) shift; cmd_leads "$@" ;;
+  companies) shift; cmd_companies "$@" ;;
+  team) shift; cmd_team "$@" ;;
+  onboarding) shift; cmd_onboarding "$@" ;;
+  help|--help|-h) cmd_help ;;
+  *) err "Unknown: $1 — run 'hi-homeinsight help'" ;;
 esac

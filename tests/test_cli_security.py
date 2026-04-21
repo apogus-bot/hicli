@@ -106,6 +106,43 @@ class HomeInsightCliSecurityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "600")
 
+    def test_parse_json_flags_prefers_explicit_json(self):
+        shell = textwrap.dedent(
+            f'''
+            set -euo pipefail
+            {SOURCE_PREFIX}
+            parse_json_flags --json '{{"hello":"world"}}'
+            '''
+        )
+        result = subprocess.run(
+            ["bash", "-lc", shell],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"hello": "world"})
+
+    def test_parse_json_flags_reads_file_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload_file = Path(tmp) / "payload.json"
+            payload_file.write_text('{"status":"draft"}', encoding="utf-8")
+            shell = textwrap.dedent(
+                f'''
+                set -euo pipefail
+                {SOURCE_PREFIX}
+                parse_json_flags --file "{payload_file}"
+                '''
+            )
+            result = subprocess.run(
+                ["bash", "-lc", shell],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"status": "draft"})
+
 
 if __name__ == "__main__":
     unittest.main()

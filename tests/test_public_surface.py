@@ -13,11 +13,15 @@ class PublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("## Admin / internal actions", action_surface)
         self.assertNotIn("raw authenticated API escape hatch", action_surface)
         self.assertNotIn("admin dashboard stats", action_surface)
+        self.assertNotIn("## Marketing / content actions", action_surface)
+        self.assertNotIn("blog create", action_surface)
 
     def test_readme_omits_admin_enablement_language(self):
         readme = README.read_text(encoding="utf-8")
         self.assertNotIn("## Admin commands", readme)
         self.assertNotIn("Only enable them for trusted internal workflows", readme)
+        self.assertNotIn("optional weekly runner", readme)
+        self.assertNotIn("blog", readme.lower())
 
     def test_public_cli_source_omits_admin_helpers_and_markers(self):
         cli = CLI.read_text(encoding="utf-8")
@@ -37,6 +41,9 @@ class PublicSurfaceTests(unittest.TestCase):
             "lib/hi_blog_create.py",
             "weekly/run_weekly.py",
             "weekly/examples",
+            "build_blog_create_payload",
+            "cmd_blog()",
+            "/api/blog",
         ]
         for item in forbidden:
             with self.subTest(item=item):
