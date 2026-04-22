@@ -152,6 +152,28 @@ class HomeInsightCliSecurityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"status": "draft"})
 
+    def test_mime_type_for_file_falls_back_without_file_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "front.jpg"
+            image_path.write_bytes(b"fake jpg bytes")
+            shell = textwrap.dedent(
+                f'''
+                set -euo pipefail
+                export PATH="/usr/local/bin:/usr/bin:/bin"
+                {SOURCE_PREFIX}
+                PATH="/usr/local/bin:/bin"
+                mime_type_for_file "{image_path}"
+                '''
+            )
+            result = subprocess.run(
+                ["bash", "-lc", shell],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "image/jpeg")
+
 
 if __name__ == "__main__":
     unittest.main()
