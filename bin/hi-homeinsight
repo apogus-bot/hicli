@@ -299,8 +299,28 @@ api_request() {
     printf '%s' "$data" > "$data_file"
     args+=( -H "Content-Type: application/json" --data-binary "@${data_file}" )
   fi
-  curl "${args[@]}" "${HI_APP}/api${path}"
+
+  # Retry once on a "Not authenticated" reply: drop the cookies, re-run
+  # ensure_auth_token (which rebuilds cookies from session.json), then
+  # repeat the request. Catches transient mid-rotation races where the
+  # cookie was valid at request build time but not at the platform's
+  # auth check.
+  local response
+  response=$(curl "${args[@]}" "${HI_APP}/api${path}")
   local curl_status=$?
+
+  if [[ "$curl_status" -eq 0 ]] && \
+     echo "$response" | jq -e '.error == "Not authenticated"' >/dev/null 2>&1; then
+    rm -f "$HI_COOKIES"
+    if ensure_auth_token; then
+      args=(-s -X "$method" -b "$HI_COOKIES")
+      [[ -n "$data_file" ]] && args+=( -H "Content-Type: application/json" --data-binary "@${data_file}" )
+      response=$(curl "${args[@]}" "${HI_APP}/api${path}")
+      curl_status=$?
+    fi
+  fi
+
+  printf '%s' "$response"
   [[ -n "$data_file" ]] && rm -f "$data_file"
   return "$curl_status"
 }
