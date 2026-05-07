@@ -520,6 +520,16 @@ cmd_properties() {
           *) err "Unknown arg for hi properties list: $1" ;;
         esac
       done
+      # Resolve `--seller-id me` to the authenticated user's UUID
+      # locally. The platform API doesn't recognize "me" as a magic
+      # value (returns "Not authenticated" or empty), so without this
+      # the natural shorthand for "my listings" silently fails or
+      # leaks platform-wide listings. Mirrors the spelling already
+      # documented in docs (`hi properties list --seller-id me`).
+      if [[ "$seller_id" == "me" ]]; then
+        seller_id=$(current_user_id 2>/dev/null || true)
+        [[ -n "$seller_id" ]] || err "could not resolve --seller-id me (no session.user_id)"
+      fi
       local qs="/properties?limit=${limit}"
       [[ -n "$status" ]] && qs+="&status=$(urlencode "$status")"
       [[ -n "$seller_id" ]] && qs+="&seller_id=$(urlencode "$seller_id")"
